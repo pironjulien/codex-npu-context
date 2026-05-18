@@ -5,8 +5,13 @@ __pycache__/
 
 # Local private data and generated artifacts.
 index/
+index-*/
+index_*/
 models/
 ov_cache/
+ov_cache-*/
+ov_cache_*/
+ov-cache*/
 *.npy
 *.jsonl
 *.log
@@ -22,3 +27,6 @@ roots.local.txt
 Thumbs.db
 .vscode/
 .idea/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
