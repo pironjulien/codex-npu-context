@@ -1,58 +1,79 @@
 # Codex NPU Context
 
-Private local semantic memory for Codex and other MCP clients, powered by Intel NPU and OpenVINO.
+NPU semantic sidecar for Codex.
 
-The useful job is narrow and practical: run semantic NPU retrieval alongside exact search. `rg` catches concrete strings, symbols, filenames, commands, and errors. The NPU sidecar catches the context you remember vaguely but cannot name exactly.
+The point is not to replace `rg`. The point is to run two complementary searches at the same time:
+
+- `rg` finds exact strings, filenames, symbols, commands, error messages, and secret-related tokens.
+- `codex-npu-context` finds local context you remember vaguely but cannot name exactly.
+
+Together they give Codex a better local recall loop: exact proof when words match, semantic leads when they do not, and a stronger "not found" when both searches come back empty.
 
 ## Why This Exists
 
-Most current laptops include an NPU, but developer tools rarely use it. Local semantic retrieval is a good fit:
+Recent laptops ship with NPUs, but developer tooling rarely uses them. Local semantic retrieval is a good fit:
 
-- context stays on your machine;
-- cloud embedding APIs are not required;
-- the main system processors remain available for coding, browsers, and builds;
-- exact search and semantic search improve each other instead of competing;
-- a small embedding model can answer "where did we solve this before?" quickly after warmup.
+- no cloud embedding API;
+- no API key;
+- data stays on the machine;
+- the main system processors stay available for the rest of the workflow;
+- a persistent MCP worker keeps the model warm after first use;
+- semantic search and exact search improve each other instead of competing.
 
-## What It Does
+## What It Is
 
-- Indexes local folders such as Codex sessions, project docs, runbooks, and architecture notes.
-- Creates embeddings with `OpenVINO/Qwen3-Embedding-0.6B-int8-ov`.
-- Gives Codex a semantic sidecar to run in parallel with exact `rg` search for vague local-memory lookups.
-- Compiles the model with fixed `[batch, 256]` shapes for Intel NPU. Interactive search uses batch 1.
-- Keeps NPU batch shapes above 1 disabled by default because some NPU driver/model combinations crash on fixed batch > 1. For NPU indexing and benchmarks, requested batch sizes are mapped to batch 1 plus async parallel requests unless you explicitly opt into experimental NPU batching.
-- Exposes search, status, and benchmark tools to MCP clients.
-- Keeps generated indexes, model files, caches, logs, and local config out of Git.
-- Returns confidence metadata and hides low-score matches by default to reduce false positives.
+Codex NPU Context is:
 
-## When It Helps
+- a local indexer for Codex sessions, memory notes, repos, runbooks, and project docs;
+- an OpenVINO embedding runner using `OpenVINO/Qwen3-Embedding-0.6B-int8-ov`;
+- a stdio MCP server exposing search, status, and benchmark tools;
+- an installable Codex skill that tells Codex when to use this sidecar;
+- a confidence-filtered retrieval aid that returns `no_confident_result` instead of low-score nearest-neighbor noise.
 
-Good use cases:
+It is NPU-only by default. Non-NPU OpenVINO devices are refused by the public runtime.
 
-- "Find the setup notes for that local bridge we configured last month."
-- "Which old session had the workaround for the blank launcher?"
-- "Where did we document the rollback command?"
-- "Search across my notes and repos for this concept, not this exact string."
+## What It Is Not
 
-Bad use cases:
+- Not a replacement for `rg`.
+- Not a secret manager.
+- Not a global memory service.
+- Not a cloud RAG stack.
+- Not a claim that Codex natively runs on your NPU.
 
-- Exact class, function, or filename lookup by itself. Use `rg`; pair with NPU only when the wording, location, or prior context is uncertain.
-- Fresh repo changes that have not been indexed yet.
-- Questions where no local context exists. The default score threshold helps, but search results are still leads, not facts.
+The useful claim is narrower: **Codex can use this MCP + skill to query a local NPU semantic sidecar automatically when a task is vague or memory-like.**
+
+## Retrieval Loop
+
+Recommended agent behavior:
+
+1. If the request is vague, memory-like, or missing exact filenames/keywords, call `codex_npu_search` with a concise natural-language query.
+2. In parallel, run `rg` for concrete tokens present in the request.
+3. Prefer `rg` for exact strings, filenames, symbols, commands, error text, and potential secrets.
+4. Prefer MCP results for semantic leads when exact wording is missing, ambiguous, translated, or too generic.
+5. Read the real files before making claims or edits.
+6. If MCP returns `no_confident_result` and `rg` has no hits, report no local confident match instead of inventing a lead.
+7. Never print credential, token, password, or key values. Report only safe file/path context unless the user explicitly asks to inspect the secret source.
+
+Example outcomes:
+
+- Vague setup memory: MCP finds the likely note, `rg` confirms exact paths or commands.
+- Exact symbol lookup: `rg` wins, MCP is optional.
+- Sensitive lookup: MCP avoids hallucinating; `rg` confirms whether secret-related tokens exist without printing values.
+- Absent topic: both return empty or weak, so Codex can say "not found" confidently.
 
 ## Requirements
 
-- Windows 11 with Intel NPU / Intel AI Boost.
+- Windows 11.
+- Intel NPU / Intel AI Boost.
 - Python 3.11.
-- Node.js 20+ for the MCP server.
+- Node.js 20+.
 - Git.
-
-This project is NPU-only. Non-NPU OpenVINO devices are refused by default.
+- `rg` from ripgrep for the exact-search half of the loop.
 
 ## Install
 
 ```powershell
-git clone <repo-url>
+git clone https://github.com/pironjulien/codex-npu-context.git
 cd codex-npu-context
 .\scripts\install.ps1
 npm install
@@ -68,19 +89,7 @@ Start small. Index only folders you are comfortable storing in a local vector in
 .\scripts\index-example.ps1 -Roots "$env:USERPROFILE\.codex\sessions" -MaxChunks 500
 ```
 
-Index multiple roots:
-
-```powershell
-.\scripts\index-example.ps1 -Roots `
-  "$env:USERPROFILE\.codex\sessions", `
-  "$env:USERPROFILE\Documents\project-notes" `
-  -MaxChunks 1000 `
-  -MaxChunksPerFile 120 `
-  -BatchSize 8 `
-  -Parallelism 1
-```
-
-For Codex history, index durable notes before raw sessions:
+For a stronger Codex memory setup, index durable notes before raw sessions:
 
 ```powershell
 .\scripts\index-example.ps1 -Roots `
@@ -93,47 +102,33 @@ For Codex history, index durable notes before raw sessions:
   -Parallelism 1
 ```
 
-Search:
+NPU batch shapes above 1 are disabled by default because some NPU driver/model combinations crash on fixed batch > 1. For NPU indexing and benchmarks, requested batch sizes are mapped to batch 1 plus async parallel requests unless you explicitly opt into experimental NPU batching.
+
+## Search From The CLI
+
+Semantic search:
 
 ```powershell
 .\scripts\search.ps1 "where are the local MCP bridge setup notes"
 ```
 
-Search with a stricter confidence threshold:
+Stricter confidence threshold:
 
 ```powershell
 .\scripts\search.ps1 "old rollback command for the local service" -MinScore 0.55
 ```
 
-Benchmark NPU query embedding/search latency:
+Exact search remains separate:
 
 ```powershell
-.\scripts\benchmark.ps1 -Iterations 30
+rg -n -i "rollback|bridge|mcp" "$env:USERPROFILE\.codex\memories" "C:\path\to\repo"
 ```
 
-Benchmark batch sizes:
-
-```powershell
-.\scripts\benchmark.ps1 -BatchSizes 1,4,8,16 -Iterations 64
-```
-
-Batch sizes above 1 are treated as NPU async parallelism by default. True fixed NPU batch shapes remain experimental and opt-in because some driver/model combinations crash.
-
-Keep the NPU busy long enough to see activity in Task Manager:
-
-```powershell
-.\scripts\benchmark.ps1 -SustainSeconds 30 -Iterations 1
-```
-
-Status:
-
-```powershell
-.\scripts\status.ps1
-```
+The intended agent workflow is to run both when the request is vague and contains concrete tokens.
 
 ## Add To Codex
 
-Install the MCP configuration and optional skill into your Codex home:
+Install the MCP configuration and the Codex skill into your Codex home:
 
 ```powershell
 .\scripts\install-codex.ps1
@@ -147,7 +142,17 @@ Verify that Codex is configured to use this repo's MCP entrypoint and skill:
 
 Restart Codex after installation so MCP servers and skills are reloaded.
 
-Manual MCP configuration is also possible. Add this to your Codex MCP configuration, adjusting the path:
+If the Python virtual environment, model, index, or OpenVINO cache live outside the repo, pass explicit paths:
+
+```powershell
+.\scripts\install-codex.ps1 `
+  -Python "C:\path\to\.venv\Scripts\python.exe" `
+  -ModelDir "C:\path\to\models\qwen3-embedding-0.6b-int8-ov" `
+  -IndexDir "C:\path\to\index" `
+  -OvCacheDir "C:\path\to\ov_cache"
+```
+
+Manual MCP configuration is also possible:
 
 ```toml
 [mcp_servers.codex-npu-context]
@@ -158,32 +163,6 @@ args = ["C:/path/to/codex-npu-context/mcp/index.js"]
 CODEX_NPU_CONTEXT_DEVICE = "NPU"
 ```
 
-If you keep the Python virtual environment, model, index, or OpenVINO cache outside the repo, pass those paths when installing:
-
-```powershell
-.\scripts\install-codex.ps1 `
-  -Python "C:\path\to\.venv\Scripts\python.exe" `
-  -ModelDir "C:\path\to\models\qwen3-embedding-0.6b-int8-ov" `
-  -IndexDir "C:\path\to\index" `
-  -OvCacheDir "C:\path\to\ov_cache"
-```
-
-The MCP server exposes:
-
-- `codex_npu_status`
-- `codex_npu_search`
-- `codex_npu_benchmark`
-
-Recommended agent behavior:
-
-- For vague local-memory lookups, run `codex_npu_search` and exact `rg` search in parallel when concrete tokens exist.
-- Prefer `rg` for exact filenames, symbols, commands, error text, and potential secrets.
-- Prefer MCP results for semantic leads when the user remembers the idea but not the wording.
-- If MCP returns `no_confident_result` and `rg` has no hits, report no local confident match instead of inventing a lead.
-- Never print credential, token, password, or key values; report only safe file/path context.
-
-The MCP server keeps a persistent Python/OpenVINO worker alive after the first request. That avoids paying tokenizer/model/index startup and NPU compilation costs on every search. If the index files change, the worker reloads them automatically on the next query.
-
 To remove first-query latency, preload the model and index when the MCP server starts:
 
 ```toml
@@ -192,11 +171,25 @@ CODEX_NPU_CONTEXT_DEVICE = "NPU"
 CODEX_NPU_CONTEXT_PRELOAD = "1"
 ```
 
-## Optional Codex Skill
+## MCP Tools
 
-This repo includes an installable Codex skill at `skills/codex-npu-context`.
+The MCP server exposes:
 
-Install it from this clone:
+- `codex_npu_status`
+- `codex_npu_search`
+- `codex_npu_benchmark`
+
+The server keeps a persistent Python/OpenVINO worker alive after the first request. That avoids paying tokenizer/model/index startup and NPU compilation costs on every search. If the index files change, the worker reloads them automatically on the next query.
+
+## Installable Codex Skill
+
+The installable skill lives at:
+
+```text
+skills/codex-npu-context
+```
+
+Install only the skill from this clone:
 
 ```powershell
 .\scripts\install-skill.ps1
@@ -208,19 +201,43 @@ Overwrite an existing local copy:
 .\scripts\install-skill.ps1 -Force
 ```
 
-Manual install is just a directory copy:
-
-```powershell
-$CodexHome = if ($env:CODEX_HOME) { $env:CODEX_HOME } else { Join-Path $env:USERPROFILE ".codex" }
-New-Item -ItemType Directory -Force (Join-Path $CodexHome "skills") | Out-Null
-Copy-Item -Recurse -Force .\skills\codex-npu-context (Join-Path $CodexHome "skills")
-```
-
 When using Codex's skill installer with GitHub, install repo `pironjulien/codex-npu-context` at path `skills/codex-npu-context`.
 
-Restart Codex after installing the skill. The skill assumes the MCP server above is already configured.
+The older standalone skill template is still available at `examples/codex-skill.md`.
 
-The older template form is still available at `examples/codex-skill.md`.
+## Benchmark
+
+NPU query embedding/search latency:
+
+```powershell
+.\scripts\benchmark.ps1 -Iterations 30
+```
+
+Batch-size/parallelism benchmark:
+
+```powershell
+.\scripts\benchmark.ps1 -BatchSizes 1,4,8,16 -Iterations 64
+```
+
+Keep the NPU busy long enough to see activity in Task Manager:
+
+```powershell
+.\scripts\benchmark.ps1 -SustainSeconds 30 -Iterations 1
+```
+
+On the maintainer setup, the real MCP worker answers warm NPU searches in roughly 200 ms. That number depends on the machine, model cache state, index size, and driver.
+
+## Output Contract
+
+`search` returns:
+
+- `status`: `ok` when at least one match passes the threshold, otherwise `no_confident_result`;
+- `has_confident_result`: false when all matches are below `min_score`;
+- `best_score`: the best raw score, even when no result passes the threshold;
+- `results`: filtered matches above `min_score`;
+- `timings_ms`: model, index, embedding, and ranking timings where applicable.
+
+This makes absence easier to detect than a raw nearest-neighbor list.
 
 ## Privacy Model
 
@@ -236,15 +253,9 @@ Your local index is private and ignored by Git:
 
 The indexer skips common credential files and redacts obvious token patterns before chunking. That is a safety net, not a permission slip. Do not index folders that contain secrets unless you understand what will be stored locally.
 
-To improve result quality, the indexer:
-
-- indexes memory and documentation-like files before raw sessions and source files;
-- skips noisy generated files such as package manager lockfiles;
-- caps chunks per file so one large session or source file cannot dominate the index;
-- writes UTF-8 JSON output, including on Windows consoles.
-
 Recommended roots:
 
+- Codex memory summaries and notes.
 - Codex session history.
 - Project docs.
 - Architecture notes.
@@ -253,7 +264,7 @@ Recommended roots:
 
 Avoid:
 
-- `.env` folders.
+- `.env` files.
 - browser profiles.
 - password managers.
 - OAuth stores.
@@ -262,38 +273,24 @@ Avoid:
 
 ## Configuration
 
-Environment variables:
-
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `CODEX_NPU_CONTEXT_DEVICE` | `NPU` | OpenVINO NPU target, for example `NPU`. Non-NPU devices are refused by default. |
+| `CODEX_NPU_CONTEXT_DEVICE` | `NPU` | OpenVINO NPU target. Non-NPU devices are refused by default. |
 | `CODEX_NPU_CONTEXT_MODEL_DIR` | `./models/qwen3-embedding-0.6b-int8-ov` | Local OpenVINO model path. |
 | `CODEX_NPU_CONTEXT_INDEX_DIR` | `./index` | Local index path. |
 | `CODEX_NPU_CONTEXT_OV_CACHE_DIR` | `./ov_cache` | OpenVINO compile cache path. |
 | `CODEX_NPU_CONTEXT_PYTHON` | `.venv` Python | Python executable used by MCP. |
 | `CODEX_NPU_CONTEXT_MIN_SCORE` | `0.45` | Default search confidence threshold. |
-| `CODEX_NPU_CONTEXT_INDEX_BATCH_SIZE` | `8` | Batch size used by the index command unless overridden. |
+| `CODEX_NPU_CONTEXT_INDEX_BATCH_SIZE` | `8` | Batch size requested by the index command. On NPU this maps to async parallel requests by default. |
 | `CODEX_NPU_CONTEXT_ALLOW_NPU_BATCH` | unset | Set to `1` to try true NPU batch shapes above 1. Experimental; batch > 1 can crash some drivers. |
 | `CODEX_NPU_CONTEXT_PRELOAD` | unset | Set to `1` to load the index and compile the model when MCP starts. |
 | `CODEX_NPU_CONTEXT_PERFORMANCE_HINT` | unset | Optional OpenVINO `PERFORMANCE_HINT`, such as `LATENCY` or `THROUGHPUT`. |
 | `CODEX_NPU_CONTEXT_TIMEOUT_MS` | `240000` | MCP search request timeout. |
 | `CODEX_NPU_CONTEXT_STATUS_TIMEOUT_MS` | `60000` | MCP status request timeout. |
 
-## Output Contract
-
-`search` returns:
-
-- `status`: `ok` when at least one match passes the threshold, otherwise `no_confident_result`;
-- `has_confident_result`: false when all matches are below `min_score`;
-- `best_score`: the best raw score, even when no result passes the threshold;
-- `results`: filtered matches above `min_score`;
-- `timings_ms`: model, index, embedding, and ranking timings where applicable.
-
-This makes absence easier to detect than a raw nearest-neighbor list.
-
 ## Similar Work
 
-There are strong local RAG and MCP memory projects already. This repo is narrower: it focuses on Codex history, Windows reproducibility, and Intel NPU acceleration through OpenVINO.
+There are strong local RAG and MCP memory projects already. This repo is narrower: it focuses on Codex history, Windows reproducibility, and Intel NPU acceleration through OpenVINO while keeping `rg` as the exact-search half of the retrieval loop.
 
 ## License
 
