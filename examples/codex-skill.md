@@ -20,7 +20,7 @@ Workflow:
 2. Call `codex_npu_search` with a concise natural-language query.
 3. Treat returned paths and excerpts as leads.
 4. Read the real files before editing or making claims.
-5. If `has_confident_result` is false, say the local index does not have a confident match and fall back to exact search or ask to rebuild the index.
+5. If `status` is `no_confident_result` or `has_confident_result` is false, say the local index does not have a confident match and fall back to exact search or ask to rebuild the index.
 
 Important:
 

@@ -506,14 +506,16 @@ def search_payload(
     results, rank_seconds, best_score = result_rows(meta, vectors, query_vector, top_k, preview_chars, effective_min_score)
     timings["rank_ms"] = round(rank_seconds * 1000, 3)
 
+    has_confident_result = bool(results)
     return {
         "ok": True,
+        "status": "ok" if has_confident_result else "no_confident_result",
         "device": embedder.device,
         "query": query,
         "chunks": len(meta),
         "min_score": effective_min_score,
         "best_score": round(best_score, 4) if best_score is not None else None,
-        "has_confident_result": bool(results),
+        "has_confident_result": has_confident_result,
         "timings_ms": timings,
         "results": results,
     }
@@ -826,7 +828,11 @@ def main() -> None:
     parser.add_argument("--device", default=os.environ.get("CODEX_NPU_CONTEXT_DEVICE", "NPU"))
     sub = parser.add_subparsers(dest="cmd", required=True)
 
+    def add_legacy_device_flag(command_parser: argparse.ArgumentParser) -> None:
+        command_parser.add_argument("--device", default=argparse.SUPPRESS, help=argparse.SUPPRESS)
+
     index_p = sub.add_parser("index", help="Build a local private semantic index.")
+    add_legacy_device_flag(index_p)
     index_p.add_argument("--roots", nargs="+", required=True)
     index_p.add_argument("--limit-mb", type=int, default=12)
     index_p.add_argument("--max-chunks", type=int, default=500)
@@ -838,6 +844,7 @@ def main() -> None:
     index_p.set_defaults(func=build_index)
 
     search_p = sub.add_parser("search", help="Search the local private index.")
+    add_legacy_device_flag(search_p)
     search_p.add_argument("query")
     search_p.add_argument("--top-k", type=int, default=8)
     search_p.add_argument("--preview-chars", type=int, default=600)
@@ -850,6 +857,7 @@ def main() -> None:
     search_p.set_defaults(func=search)
 
     status_p = sub.add_parser("status", help="Show model, index, and OpenVINO device status.")
+    add_legacy_device_flag(status_p)
     status_p.add_argument(
         "--device-names",
         action="store_true",
@@ -858,6 +866,7 @@ def main() -> None:
     status_p.set_defaults(func=status)
 
     bench_p = sub.add_parser("bench", help="Benchmark query embedding/search latency against the current index.")
+    add_legacy_device_flag(bench_p)
     bench_p.add_argument("--devices", nargs="+", help="Devices to compare, for example: NPU CPU")
     bench_p.add_argument("--iterations", type=int, default=20)
     bench_p.add_argument("--warmup", type=int, default=2)
@@ -869,6 +878,7 @@ def main() -> None:
     bench_p.set_defaults(func=benchmark)
 
     serve_p = sub.add_parser("serve", help="Run a persistent JSONL worker for MCP.")
+    add_legacy_device_flag(serve_p)
     serve_p.set_defaults(func=serve)
 
     args = parser.parse_args()

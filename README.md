@@ -234,6 +234,7 @@ Environment variables:
 
 `search` returns:
 
+- `status`: `ok` when at least one match passes the threshold, otherwise `no_confident_result`;
 - `has_confident_result`: false when all matches are below `min_score`;
 - `best_score`: the best raw score, even when no result passes the threshold;
 - `results`: filtered matches above `min_score`;
