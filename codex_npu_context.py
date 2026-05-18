@@ -17,6 +17,8 @@ DEFAULT_MODEL_DIR = ROOT / "models" / "qwen3-embedding-0.6b-int8-ov"
 DEFAULT_INDEX_DIR = ROOT / "index"
 MAX_LEN = 256
 DEFAULT_MIN_SCORE = 0.45
+DEFAULT_INDEX_BATCH_SIZE = 8
+DEFAULT_BENCH_BATCH_SIZES = [1, 4, 8, 16]
 
 DEFAULT_EXTENSIONS = {
     ".py", ".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs", ".ps1", ".psm1",
@@ -91,6 +93,36 @@ def default_min_score() -> float:
         return DEFAULT_MIN_SCORE
 
 
+def default_index_batch_size() -> int:
+    value = os.environ.get("CODEX_NPU_CONTEXT_INDEX_BATCH_SIZE")
+    if value is None:
+        return DEFAULT_INDEX_BATCH_SIZE
+    try:
+        return max(1, int(value))
+    except ValueError:
+        return DEFAULT_INDEX_BATCH_SIZE
+
+
+def allow_npu_batch() -> bool:
+    return os.environ.get("CODEX_NPU_CONTEXT_ALLOW_NPU_BATCH", "").strip().lower() in {"1", "true", "yes"}
+
+
+def is_npu_device(device: str) -> bool:
+    return device.upper().startswith("NPU")
+
+
+def execution_shape(device: str, requested_batch_size: int, requested_parallelism: int = 1) -> tuple[int, int, str | None]:
+    requested_batch_size = max(1, int(requested_batch_size))
+    requested_parallelism = max(1, int(requested_parallelism))
+    if is_npu_device(device) and requested_batch_size > 1 and not allow_npu_batch():
+        return (
+            1,
+            max(requested_parallelism, requested_batch_size),
+            "NPU batch shapes above 1 are disabled by default because some drivers crash; using batch 1 with async parallel requests.",
+        )
+    return requested_batch_size, requested_parallelism, None
+
+
 def ensure_model_exists() -> None:
     missing = [
         name for name in ("openvino_model.xml", "openvino_model.bin", "tokenizer.json")
@@ -113,9 +145,11 @@ def redact_secrets(text: str) -> str:
 
 
 class Qwen3OpenVinoEmbedder:
-    def __init__(self, device: str = "NPU"):
+    def __init__(self, device: str = "NPU", batch_size: int = 1, parallelism: int = 1):
         ensure_model_exists()
         self.device = device
+        self.batch_size = max(1, int(batch_size))
+        self.parallelism = max(1, int(parallelism))
         self.tokenizer = AutoTokenizer.from_pretrained(
             str(model_dir()),
             local_files_only=True,
@@ -133,7 +167,7 @@ class Qwen3OpenVinoEmbedder:
             )
 
         model = core.read_model(str(model_dir() / "openvino_model.xml"))
-        model.reshape({"input_ids": [1, MAX_LEN], "attention_mask": [1, MAX_LEN]})
+        model.reshape({"input_ids": [self.batch_size, MAX_LEN], "attention_mask": [self.batch_size, MAX_LEN]})
         self.compile_properties = compile_properties()
         started = time.time()
         if self.compile_properties:
@@ -144,33 +178,95 @@ class Qwen3OpenVinoEmbedder:
         self.output = self.compiled.output("last_hidden_state")
 
     def embed_one(self, text: str, *, is_query: bool = False) -> np.ndarray:
-        if is_query:
-            text = (
-                "Instruct: Retrieve relevant code, configuration, setup notes, "
-                "debugging history, and prior agent context.\nQuery: "
-                + text
-            )
+        return self.embed_batch([text], is_query=is_query)[0]
+
+    def embed_batch(self, texts: list[str], *, is_query: bool = False) -> np.ndarray:
+        if not texts:
+            return np.zeros((0, 1024), dtype=np.float32)
+        if len(texts) > self.batch_size:
+            raise ValueError(f"Batch has {len(texts)} texts but compiled batch size is {self.batch_size}.")
+        original_count = len(texts)
+        input_ids, attention_mask = self.encode_texts(texts, is_query=is_query)
+        if len(texts) < self.batch_size:
+            pad_count = self.batch_size - len(texts)
+            pad_ids, pad_mask = self.encode_texts([""] * pad_count, is_query=False)
+            input_ids = np.vstack([input_ids, pad_ids])
+            attention_mask = np.vstack([attention_mask, pad_mask])
+        result = self.compiled({"input_ids": input_ids, "attention_mask": attention_mask})
+        hidden = result[self.output]
+        return self.vectors_from_hidden(hidden[:original_count], attention_mask[:original_count])
+
+    def encode_texts(self, texts: list[str], *, is_query: bool = False) -> tuple[np.ndarray, np.ndarray]:
+        prepared = [self.prepare_text(text, is_query=is_query) for text in texts]
         encoded = self.tokenizer(
-            text,
+            prepared,
             max_length=MAX_LEN,
             padding="max_length",
             truncation=True,
             return_tensors="np",
         )
-        input_ids = encoded["input_ids"].astype(np.int64)
-        attention_mask = encoded["attention_mask"].astype(np.int64)
-        result = self.compiled({"input_ids": input_ids, "attention_mask": attention_mask})
-        hidden = result[self.output][0]
-        last_index = int(attention_mask[0].sum()) - 1
-        vector = hidden[max(last_index, 0)].astype(np.float32)
-        norm = np.linalg.norm(vector)
-        return vector / norm if norm > 0 else vector
+        return encoded["input_ids"].astype(np.int64), encoded["attention_mask"].astype(np.int64)
+
+    @staticmethod
+    def vectors_from_hidden(hidden: np.ndarray, attention_mask: np.ndarray) -> np.ndarray:
+        vectors = []
+        for row in range(hidden.shape[0]):
+            last_index = int(attention_mask[row].sum()) - 1
+            vector = hidden[row, max(last_index, 0)].astype(np.float32)
+            norm = np.linalg.norm(vector)
+            vectors.append(vector / norm if norm > 0 else vector)
+        return np.vstack(vectors).astype(np.float32)
+
+    @staticmethod
+    def prepare_text(text: str, *, is_query: bool = False) -> str:
+        if is_query:
+            return (
+                "Instruct: Retrieve relevant code, configuration, setup notes, "
+                "debugging history, and prior agent context.\nQuery: "
+                + text
+            )
+        return text
 
     def embed_many(self, texts: list[str], *, is_query: bool = False) -> np.ndarray:
-        vectors = [self.embed_one(text, is_query=is_query) for text in texts]
-        if not vectors:
+        if not texts:
             return np.zeros((0, 1024), dtype=np.float32)
-        return np.vstack(vectors).astype(np.float32)
+        if self.batch_size == 1 and self.parallelism > 1 and len(texts) > 1:
+            return self.embed_many_async(texts, is_query=is_query)
+        batches = [
+            self.embed_batch(texts[i:i + self.batch_size], is_query=is_query)
+            for i in range(0, len(texts), self.batch_size)
+        ]
+        return np.vstack(batches).astype(np.float32)
+
+    def embed_many_async(self, texts: list[str], *, is_query: bool = False) -> np.ndarray:
+        input_ids, attention_mask = self.encode_texts(texts, is_query=is_query)
+        request_count = min(self.parallelism, len(texts))
+        requests = [self.compiled.create_infer_request() for _ in range(request_count)]
+        available = requests[:]
+        inflight: list[tuple[int, object]] = []
+        vectors: list[np.ndarray | None] = [None] * len(texts)
+        next_index = 0
+
+        while next_index < len(texts) or inflight:
+            while next_index < len(texts) and available:
+                request = available.pop()
+                request.start_async({
+                    "input_ids": input_ids[next_index:next_index + 1],
+                    "attention_mask": attention_mask[next_index:next_index + 1],
+                })
+                inflight.append((next_index, request))
+                next_index += 1
+
+            current_index, request = inflight.pop(0)
+            request.wait()
+            hidden = request.get_tensor(self.output).data
+            vectors[current_index] = self.vectors_from_hidden(
+                hidden,
+                attention_mask[current_index:current_index + 1],
+            )[0]
+            available.append(request)
+
+        return np.vstack([vector for vector in vectors if vector is not None]).astype(np.float32)
 
 
 DEFAULT_BENCH_QUERIES = [
@@ -297,7 +393,8 @@ def build_index(args: argparse.Namespace) -> None:
             break
 
     index_dir().mkdir(parents=True, exist_ok=True)
-    embedder = Qwen3OpenVinoEmbedder(args.device)
+    batch_size, parallelism, batch_note = execution_shape(args.device, args.batch_size, args.parallelism)
+    embedder = Qwen3OpenVinoEmbedder(args.device, batch_size=batch_size, parallelism=parallelism)
     started = time.time()
     vectors = embedder.embed_many([c["text"] for c in chunks])
     elapsed = time.time() - started
@@ -311,6 +408,10 @@ def build_index(args: argparse.Namespace) -> None:
         "ok": True,
         "device": args.device,
         "available_devices": embedder.devices,
+        "requested_batch_size": args.batch_size,
+        "batch_size": embedder.batch_size,
+        "parallelism": embedder.parallelism,
+        "batch_note": batch_note,
         "compile_seconds": round(embedder.compile_seconds, 3),
         "compile_properties": embedder.compile_properties,
         "files": len(files),
@@ -442,6 +543,8 @@ def status_payload(device: str, *, include_device_names: bool = False) -> dict:
         "devices": core.available_devices,
         "preferred_device": device,
         "min_score": default_min_score(),
+        "default_index_batch_size": default_index_batch_size(),
+        "allow_npu_batch": allow_npu_batch(),
         "compile_properties": compile_properties(),
     }
     if include_device_names:
@@ -479,6 +582,8 @@ def benchmark_payload(
     meta, vectors = load_index()
     queries = args.queries or DEFAULT_BENCH_QUERIES
     devices = args.devices or [args.device]
+    batch_sizes = args.batch_sizes or DEFAULT_BENCH_BATCH_SIZES
+    batch_sizes = [max(1, int(batch_size)) for batch_size in batch_sizes]
     iterations = max(1, args.iterations)
     warmup = max(0, args.warmup)
     cached_embedders = cached_embedders or {}
@@ -494,65 +599,115 @@ def benchmark_payload(
     }
 
     for device in devices:
-        embedder = cached_embedders.get(device)
-        cached_model = embedder is not None
-        if embedder is None:
-            device_started = time.perf_counter()
-            embedder = Qwen3OpenVinoEmbedder(device)
-            init_seconds = time.perf_counter() - device_started
-        else:
+        device_payload = {"device": device, "batch_runs": []}
+        for requested_batch_size in batch_sizes:
+            requested_parallelism = requested_batch_size if is_npu_device(device) and not allow_npu_batch() else 1
+            effective_batch_size, parallelism, batch_note = execution_shape(
+                device,
+                requested_batch_size,
+                requested_parallelism,
+            )
+            group_size = max(effective_batch_size, parallelism)
+            cached = cached_embedders.get(device)
+            embedder = (
+                cached
+                if cached is not None
+                and cached.batch_size == effective_batch_size
+                and cached.parallelism == parallelism
+                else None
+            )
+            cached_model = embedder is not None
             init_seconds = 0.0
+            try:
+                if embedder is None:
+                    device_started = time.perf_counter()
+                    embedder = Qwen3OpenVinoEmbedder(device, batch_size=effective_batch_size, parallelism=parallelism)
+                    init_seconds = time.perf_counter() - device_started
 
-        for i in range(warmup):
-            embedder.embed_one(queries[i % len(queries)], is_query=True)
+                for i in range(warmup):
+                    warmup_batch = [queries[(i * group_size + j) % len(queries)] for j in range(group_size)]
+                    embedder.embed_many(warmup_batch, is_query=True)
 
-        embed_ms: list[float] = []
-        rank_ms: list[float] = []
-        top_samples = []
-        run_started = time.perf_counter()
-        minimum_until = run_started + max(0.0, args.sustain_seconds)
-        completed = 0
+                embed_batch_ms: list[float] = []
+                embed_per_query_ms: list[float] = []
+                rank_ms: list[float] = []
+                top_samples = []
+                run_started = time.perf_counter()
+                minimum_until = run_started + max(0.0, args.sustain_seconds)
+                completed_queries = 0
+                completed_batches = 0
 
-        while completed < iterations or time.perf_counter() < minimum_until:
-            query = queries[completed % len(queries)]
-            started = time.perf_counter()
-            query_vector = embedder.embed_one(query, is_query=True)
-            embed_ms.append((time.perf_counter() - started) * 1000)
-            results, rank_seconds, _best_score = result_rows(meta, vectors, query_vector, args.top_k, args.preview_chars, 0.0)
-            rank_ms.append(rank_seconds * 1000)
-            if len(top_samples) < len(queries):
-                top_samples.append({
-                    "query": query,
-                    "top": [
-                        {"score": item["score"], "path": item["path"], "chunk": item["chunk"]}
-                        for item in results[: min(3, len(results))]
-                    ],
-                })
-            completed += 1
+                while completed_queries < iterations or time.perf_counter() < minimum_until:
+                    batch_queries = [queries[(completed_queries + j) % len(queries)] for j in range(group_size)]
+                    started = time.perf_counter()
+                    query_vectors = embedder.embed_many(batch_queries, is_query=True)
+                    batch_elapsed_ms = (time.perf_counter() - started) * 1000
+                    embed_batch_ms.append(batch_elapsed_ms)
+                    embed_per_query_ms.append(batch_elapsed_ms / len(batch_queries))
+                    for query, query_vector in zip(batch_queries, query_vectors):
+                        results, rank_seconds, _best_score = result_rows(
+                            meta,
+                            vectors,
+                            query_vector,
+                            args.top_k,
+                            args.preview_chars,
+                            0.0,
+                        )
+                        rank_ms.append(rank_seconds * 1000)
+                        if len(top_samples) < len(queries):
+                            top_samples.append({
+                                "query": query,
+                                "top": [
+                                    {"score": item["score"], "path": item["path"], "chunk": item["chunk"]}
+                                    for item in results[: min(3, len(results))]
+                                ],
+                            })
+                    completed_queries += len(batch_queries)
+                    completed_batches += 1
 
-        elapsed = time.perf_counter() - run_started
-        payload["devices"].append({
-            "device": device,
-            "available_devices": embedder.devices,
-            "init_seconds": round(init_seconds, 3),
-            "compile_seconds": round(embedder.compile_seconds, 3),
-            "compile_properties": embedder.compile_properties,
-            "cached_model": cached_model,
-            "completed_queries": completed,
-            "elapsed_seconds": round(elapsed, 3),
-            "queries_per_second": round(completed / elapsed, 3) if elapsed else None,
-            "embed_ms": {
-                "min": round(min(embed_ms), 3) if embed_ms else None,
-                "p50": round(percentile(embed_ms, 0.5), 3) if embed_ms else None,
-                "p95": round(percentile(embed_ms, 0.95), 3) if embed_ms else None,
-                "max": round(max(embed_ms), 3) if embed_ms else None,
-            },
-            "rank_ms": {
-                "p50": round(percentile(rank_ms, 0.5), 3) if rank_ms else None,
-                "p95": round(percentile(rank_ms, 0.95), 3) if rank_ms else None,
-            },
-            "top_samples": top_samples,
-        })
+                elapsed = time.perf_counter() - run_started
+                run_payload = {
+                    "requested_batch_size": requested_batch_size,
+                    "batch_size": effective_batch_size,
+                    "parallelism": embedder.parallelism,
+                    "batch_note": batch_note,
+                    "available_devices": embedder.devices,
+                    "init_seconds": round(init_seconds, 3),
+                    "compile_seconds": round(embedder.compile_seconds, 3),
+                    "compile_properties": embedder.compile_properties,
+                    "cached_model": cached_model,
+                    "completed_batches": completed_batches,
+                    "completed_queries": completed_queries,
+                    "elapsed_seconds": round(elapsed, 3),
+                    "queries_per_second": round(completed_queries / elapsed, 3) if elapsed else None,
+                    "embed_batch_ms": {
+                        "min": round(min(embed_batch_ms), 3) if embed_batch_ms else None,
+                        "p50": round(percentile(embed_batch_ms, 0.5), 3) if embed_batch_ms else None,
+                        "p95": round(percentile(embed_batch_ms, 0.95), 3) if embed_batch_ms else None,
+                        "max": round(max(embed_batch_ms), 3) if embed_batch_ms else None,
+                    },
+                    "embed_per_query_ms": {
+                        "p50": round(percentile(embed_per_query_ms, 0.5), 3) if embed_per_query_ms else None,
+                        "p95": round(percentile(embed_per_query_ms, 0.95), 3) if embed_per_query_ms else None,
+                    },
+                    "rank_ms": {
+                        "p50": round(percentile(rank_ms, 0.5), 3) if rank_ms else None,
+                        "p95": round(percentile(rank_ms, 0.95), 3) if rank_ms else None,
+                    },
+                    "top_samples": top_samples,
+                }
+            except Exception as exc:
+                error = str(exc)
+                run_payload = {
+                    "requested_batch_size": requested_batch_size,
+                    "batch_size": effective_batch_size,
+                    "parallelism": parallelism,
+                    "batch_note": batch_note,
+                    "cached_model": cached_model,
+                    "error": error,
+                }
+            device_payload["batch_runs"].append(run_payload)
+        payload["devices"].append(device_payload)
     return payload
 
 
@@ -632,6 +787,7 @@ class JsonLineWorker:
                 sustain_seconds=float(params.get("sustain_seconds", 0)),
                 top_k=int(params.get("top_k", 3)),
                 preview_chars=int(params.get("preview_chars", 160)),
+                batch_sizes=params.get("batch_sizes") or None,
                 queries=params.get("queries") or None,
             )
             cached = {self.device: self.embedder} if self.embedder is not None else None
@@ -675,6 +831,8 @@ def main() -> None:
     index_p.add_argument("--limit-mb", type=int, default=12)
     index_p.add_argument("--max-chunks", type=int, default=500)
     index_p.add_argument("--max-chunks-per-file", type=int, default=120)
+    index_p.add_argument("--batch-size", type=int, default=default_index_batch_size())
+    index_p.add_argument("--parallelism", type=int, default=1)
     index_p.add_argument("--chunk-chars", type=int, default=1400)
     index_p.add_argument("--overlap", type=int, default=180)
     index_p.set_defaults(func=build_index)
@@ -706,6 +864,7 @@ def main() -> None:
     bench_p.add_argument("--sustain-seconds", type=float, default=0)
     bench_p.add_argument("--top-k", type=int, default=3)
     bench_p.add_argument("--preview-chars", type=int, default=160)
+    bench_p.add_argument("--batch-sizes", nargs="+", type=int, default=None)
     bench_p.add_argument("--queries", nargs="*", help="Queries to cycle through during the benchmark.")
     bench_p.set_defaults(func=benchmark)
 

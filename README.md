@@ -17,7 +17,8 @@ Most current laptops include an NPU, but developer tools rarely use it. Local se
 
 - Indexes local folders such as Codex sessions, project docs, runbooks, and architecture notes.
 - Creates embeddings with `OpenVINO/Qwen3-Embedding-0.6B-int8-ov`.
-- Compiles the model on `NPU` with a fixed `[1, 256]` input shape.
+- Compiles the model with fixed `[batch, 256]` shapes. Interactive search uses batch 1. Indexing and benchmarks can use larger batches where the OpenVINO device supports them.
+- Keeps NPU batch shapes above 1 disabled by default because some NPU driver/model combinations crash on fixed batch > 1. For NPU indexing and benchmarks, requested batch sizes are mapped to batch 1 plus async parallel requests unless you explicitly opt into experimental NPU batching.
 - Exposes search, status, and benchmark tools to MCP clients.
 - Keeps generated indexes, model files, caches, logs, and local config out of Git.
 - Returns confidence metadata and hides low-score matches by default to reduce false positives.
@@ -72,7 +73,9 @@ Index multiple roots:
   "$env:USERPROFILE\.codex\sessions", `
   "$env:USERPROFILE\Documents\project-notes" `
   -MaxChunks 1000 `
-  -MaxChunksPerFile 120
+  -MaxChunksPerFile 120 `
+  -BatchSize 8 `
+  -Parallelism 1
 ```
 
 For Codex history, index durable notes before raw sessions:
@@ -83,7 +86,9 @@ For Codex history, index durable notes before raw sessions:
   "$env:USERPROFILE\.codex\sessions", `
   "$env:USERPROFILE\Documents\project-notes" `
   -MaxChunks 1200 `
-  -MaxChunksPerFile 120
+  -MaxChunksPerFile 120 `
+  -BatchSize 8 `
+  -Parallelism 1
 ```
 
 Search:
@@ -103,6 +108,14 @@ Benchmark NPU vs CPU query embedding/search latency:
 ```powershell
 .\scripts\benchmark.ps1 -Devices NPU,CPU -Iterations 30
 ```
+
+Benchmark batch sizes:
+
+```powershell
+.\scripts\benchmark.ps1 -Devices NPU -BatchSizes 1,4,8,16 -Iterations 64
+```
+
+On NPU, batch sizes above 1 are treated as async parallelism by default. On CPU/GPU, they are compiled as real fixed batch shapes.
 
 Keep the NPU busy long enough to see activity in Task Manager:
 
@@ -210,6 +223,8 @@ Environment variables:
 | `CODEX_NPU_CONTEXT_OV_CACHE_DIR` | `./ov_cache` | OpenVINO compile cache path. |
 | `CODEX_NPU_CONTEXT_PYTHON` | `.venv` Python | Python executable used by MCP. |
 | `CODEX_NPU_CONTEXT_MIN_SCORE` | `0.45` | Default search confidence threshold. |
+| `CODEX_NPU_CONTEXT_INDEX_BATCH_SIZE` | `8` | Batch size used by the index command unless overridden. |
+| `CODEX_NPU_CONTEXT_ALLOW_NPU_BATCH` | unset | Set to `1` to try true NPU batch shapes above 1. Experimental; batch > 1 can crash some drivers. |
 | `CODEX_NPU_CONTEXT_PRELOAD` | unset | Set to `1` to load the index and compile the model when MCP starts. |
 | `CODEX_NPU_CONTEXT_PERFORMANCE_HINT` | unset | Optional OpenVINO `PERFORMANCE_HINT`, such as `LATENCY` or `THROUGHPUT`. |
 | `CODEX_NPU_CONTEXT_TIMEOUT_MS` | `240000` | MCP search request timeout. |

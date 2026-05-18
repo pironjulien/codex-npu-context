@@ -204,6 +204,11 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
             default: 0,
           },
           top_k: { type: "number", description: "Number of search results per query.", default: 3 },
+          batch_sizes: {
+            type: "array",
+            items: { type: "number" },
+            description: "Batch sizes to test, for example [1, 4, 8, 16]. On NPU these map to async parallelism unless experimental NPU batching is enabled.",
+          },
           queries: {
             type: "array",
             items: { type: "string" },
@@ -251,6 +256,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     }
     if (Number.isFinite(Number(args.top_k))) {
       params.top_k = Math.max(1, Math.min(20, Number(args.top_k)));
+    }
+    if (Array.isArray(args.batch_sizes) && args.batch_sizes.length > 0) {
+      params.batch_sizes = args.batch_sizes
+        .map((batchSize) => Math.max(1, Math.min(64, Number(batchSize))))
+        .filter(Number.isFinite);
     }
     if (Array.isArray(args.queries) && args.queries.length > 0) {
       params.queries = args.queries.map((query) => String(query)).filter(Boolean);
