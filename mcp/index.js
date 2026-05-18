@@ -21,6 +21,7 @@ const LOG_DIR = path.join(os.homedir(), ".codex-npu-context", "logs");
 const LOG_FILE = path.join(LOG_DIR, "mcp.log");
 const REQUEST_TIMEOUT_MS = Number(process.env.CODEX_NPU_CONTEXT_TIMEOUT_MS || 240_000);
 const STATUS_TIMEOUT_MS = Number(process.env.CODEX_NPU_CONTEXT_STATUS_TIMEOUT_MS || 60_000);
+const PRELOAD = /^(1|true|yes)$/i.test(process.env.CODEX_NPU_CONTEXT_PRELOAD || "");
 
 fs.mkdirSync(LOG_DIR, { recursive: true });
 
@@ -171,6 +172,10 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
         properties: {
           query: { type: "string", description: "Natural-language query." },
           top_k: { type: "number", description: "Number of results.", default: 8 },
+          min_score: {
+            type: "number",
+            description: "Hide matches below this cosine score. Defaults to CODEX_NPU_CONTEXT_MIN_SCORE or 0.45.",
+          },
         },
         required: ["query"],
       },
@@ -219,7 +224,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     const topK = Number.isFinite(Number(args.top_k))
       ? Math.max(1, Math.min(20, Number(args.top_k)))
       : 8;
-    return text(JSON.stringify(await callWorker("search", { query, top_k: topK }), null, 2));
+    const params = { query, top_k: topK };
+    if (Number.isFinite(Number(args.min_score))) {
+      params.min_score = Math.max(-1, Math.min(1, Number(args.min_score)));
+    }
+    return text(JSON.stringify(await callWorker("search", params), null, 2));
   }
 
   if (name === "codex_npu_status") {
@@ -254,6 +263,12 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
 const transport = new StdioServerTransport();
 await server.connect(transport);
+
+if (PRELOAD) {
+  callWorker("preload", {}, REQUEST_TIMEOUT_MS).catch((error) => {
+    log(`preload failed: ${error.message}`);
+  });
+}
 
 process.on("exit", stopWorker);
 process.on("SIGINT", () => {

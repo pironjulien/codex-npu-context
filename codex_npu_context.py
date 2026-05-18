@@ -16,6 +16,7 @@ ROOT = Path(__file__).resolve().parent
 DEFAULT_MODEL_DIR = ROOT / "models" / "qwen3-embedding-0.6b-int8-ov"
 DEFAULT_INDEX_DIR = ROOT / "index"
 MAX_LEN = 256
+DEFAULT_MIN_SCORE = 0.45
 
 DEFAULT_EXTENSIONS = {
     ".py", ".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs", ".ps1", ".psm1",
@@ -78,6 +79,16 @@ def compile_properties() -> dict[str, str]:
     if not performance_hint:
         return {}
     return {"PERFORMANCE_HINT": performance_hint}
+
+
+def default_min_score() -> float:
+    value = os.environ.get("CODEX_NPU_CONTEXT_MIN_SCORE")
+    if value is None:
+        return DEFAULT_MIN_SCORE
+    try:
+        return float(value)
+    except ValueError:
+        return DEFAULT_MIN_SCORE
 
 
 def ensure_model_exists() -> None:
@@ -163,10 +174,10 @@ class Qwen3OpenVinoEmbedder:
 
 
 DEFAULT_BENCH_QUERIES = [
-    "where did we configure Open WebUI MTP",
-    "pcportable selective US proxy tailscale chrome webrtc leak",
-    "SubagentLocal MCP bridge local workers configuration",
-    "how to index Codex memories before raw sessions",
+    "where are the local MCP bridge setup notes",
+    "find the old proxy setup and leak prevention details",
+    "what did we decide about indexing memory before raw chat logs",
+    "which files explain how to start the development server",
 ]
 
 
@@ -333,25 +344,32 @@ def result_rows(
     query_vector: np.ndarray,
     top_k: int,
     preview_chars: int,
-) -> tuple[list[dict], float]:
+    min_score: float = 0.0,
+) -> tuple[list[dict], float, float | None]:
     started = time.perf_counter()
     scores = vectors @ query_vector
-    top_idx = np.argsort(-scores)[:top_k]
+    top_idx = np.argsort(-scores)
     rank_seconds = time.perf_counter() - started
+    best_score = float(scores[int(top_idx[0])]) if len(top_idx) else None
 
     results = []
     for idx in top_idx:
         item = meta[int(idx)]
+        score = float(scores[int(idx)])
+        if score < min_score:
+            continue
         text = item["text"]
         if len(text) > preview_chars:
             text = text[:preview_chars].rstrip() + "..."
         results.append({
-            "score": round(float(scores[int(idx)]), 4),
+            "score": round(score, 4),
             "path": item["path"],
             "chunk": item["chunk"],
             "text": text,
         })
-    return results, rank_seconds
+        if len(results) >= top_k:
+            break
+    return results, rank_seconds, best_score
 
 
 def search_payload(
@@ -360,6 +378,7 @@ def search_payload(
     device: str,
     top_k: int = 8,
     preview_chars: int = 600,
+    min_score: float | None = None,
     embedder: Qwen3OpenVinoEmbedder | None = None,
     meta: list[dict] | None = None,
     vectors: np.ndarray | None = None,
@@ -382,7 +401,8 @@ def search_payload(
     started = time.perf_counter()
     query_vector = embedder.embed_one(query, is_query=True)
     timings["embed_ms"] = round((time.perf_counter() - started) * 1000, 3)
-    results, rank_seconds = result_rows(meta, vectors, query_vector, top_k, preview_chars)
+    effective_min_score = default_min_score() if min_score is None else min_score
+    results, rank_seconds, best_score = result_rows(meta, vectors, query_vector, top_k, preview_chars, effective_min_score)
     timings["rank_ms"] = round(rank_seconds * 1000, 3)
 
     return {
@@ -390,6 +410,9 @@ def search_payload(
         "device": embedder.device,
         "query": query,
         "chunks": len(meta),
+        "min_score": effective_min_score,
+        "best_score": round(best_score, 4) if best_score is not None else None,
+        "has_confident_result": bool(results),
         "timings_ms": timings,
         "results": results,
     }
@@ -402,6 +425,7 @@ def search(args: argparse.Namespace) -> None:
             device=args.device,
             top_k=args.top_k,
             preview_chars=args.preview_chars,
+            min_score=args.min_score,
         ),
         ensure_ascii=False,
         indent=2,
@@ -417,6 +441,7 @@ def status_payload(device: str, *, include_device_names: bool = False) -> dict:
         "index_exists": meta_path().exists() and emb_path().exists(),
         "devices": core.available_devices,
         "preferred_device": device,
+        "min_score": default_min_score(),
         "compile_properties": compile_properties(),
     }
     if include_device_names:
@@ -493,7 +518,7 @@ def benchmark_payload(
             started = time.perf_counter()
             query_vector = embedder.embed_one(query, is_query=True)
             embed_ms.append((time.perf_counter() - started) * 1000)
-            results, rank_seconds = result_rows(meta, vectors, query_vector, args.top_k, args.preview_chars)
+            results, rank_seconds, _best_score = result_rows(meta, vectors, query_vector, args.top_k, args.preview_chars, 0.0)
             rank_ms.append(rank_seconds * 1000)
             if len(top_samples) < len(queries):
                 top_samples.append({
@@ -568,16 +593,29 @@ class JsonLineWorker:
             payload["model_loaded"] = self.embedder is not None
             payload["index_loaded"] = self.meta is not None and self.vectors is not None
             return payload
+        if method == "preload":
+            meta, vectors = self.get_index()
+            embedder = self.get_embedder()
+            return {
+                "ok": True,
+                "device": self.device,
+                "chunks": len(meta),
+                "vectors_shape": list(vectors.shape),
+                "compile_seconds": round(embedder.compile_seconds, 3),
+                "compile_properties": embedder.compile_properties,
+            }
         if method == "search":
             query = str(params.get("query", "")).strip()
             top_k = int(params.get("top_k", 8))
             preview_chars = int(params.get("preview_chars", 600))
+            min_score = float(params.get("min_score", default_min_score()))
             meta, vectors = self.get_index()
             return search_payload(
                 query,
                 device=self.device,
                 top_k=max(1, min(20, top_k)),
                 preview_chars=max(80, min(4000, preview_chars)),
+                min_score=min_score,
                 embedder=self.get_embedder(),
                 meta=meta,
                 vectors=vectors,
@@ -645,6 +683,12 @@ def main() -> None:
     search_p.add_argument("query")
     search_p.add_argument("--top-k", type=int, default=8)
     search_p.add_argument("--preview-chars", type=int, default=600)
+    search_p.add_argument(
+        "--min-score",
+        type=float,
+        default=None,
+        help=f"Hide matches below this cosine score. Defaults to CODEX_NPU_CONTEXT_MIN_SCORE or {DEFAULT_MIN_SCORE}.",
+    )
     search_p.set_defaults(func=search)
 
     status_p = sub.add_parser("status", help="Show model, index, and OpenVINO device status.")
