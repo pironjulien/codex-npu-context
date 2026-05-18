@@ -1,0 +1,31 @@
+param(
+    [string[]]$Devices = @("NPU", "CPU"),
+    [int]$Iterations = 20,
+    [int]$Warmup = 2,
+    [double]$SustainSeconds = 0,
+    [int]$TopK = 3,
+    [string[]]$Queries = @()
+)
+
+$ErrorActionPreference = "Stop"
+$Root = Split-Path -Parent $PSScriptRoot
+$Python = Join-Path $Root ".venv\Scripts\python.exe"
+$Script = Join-Path $Root "codex_npu_context.py"
+
+$Args = @(
+    $Script,
+    "bench",
+    "--devices"
+) + $Devices + @(
+    "--iterations", $Iterations,
+    "--warmup", $Warmup,
+    "--sustain-seconds", $SustainSeconds,
+    "--top-k", $TopK
+)
+
+if ($Queries.Count -gt 0) {
+    $Args += "--queries"
+    $Args += $Queries
+}
+
+& $Python @Args

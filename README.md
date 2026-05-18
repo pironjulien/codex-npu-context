@@ -52,13 +52,37 @@ Index multiple roots:
 .\scripts\index-example.ps1 -Roots `
   "$env:USERPROFILE\.codex\sessions", `
   "C:\Dev\my-project\docs" `
-  -MaxChunks 1000
+  -MaxChunks 1000 `
+  -MaxChunksPerFile 120
+```
+
+For Codex history, it is usually worth indexing memories before raw sessions:
+
+```powershell
+.\scripts\index-example.ps1 -Roots `
+  "$env:USERPROFILE\.codex\memories", `
+  "$env:USERPROFILE\.codex\sessions", `
+  "C:\Dev\my-project\docs" `
+  -MaxChunks 1200 `
+  -MaxChunksPerFile 120
 ```
 
 Search:
 
 ```powershell
 .\scripts\search.ps1 "where did we configure Open WebUI MTP"
+```
+
+Benchmark NPU vs CPU query embedding/search latency:
+
+```powershell
+.\scripts\benchmark.ps1 -Devices NPU,CPU -Iterations 30
+```
+
+To keep the NPU busy long enough to see it in Task Manager, add a sustained run:
+
+```powershell
+.\scripts\benchmark.ps1 -Devices NPU -SustainSeconds 30 -Iterations 1
 ```
 
 Status:
@@ -84,6 +108,9 @@ The MCP server exposes:
 
 - `codex_npu_status`
 - `codex_npu_search`
+- `codex_npu_benchmark`
+
+The MCP server keeps a persistent Python/OpenVINO worker alive after the first request. That avoids paying tokenizer/model/index startup and NPU compilation costs on every search. If the index files change, the worker reloads them automatically on the next query.
 
 ## Privacy Model
 
@@ -98,6 +125,13 @@ Your local index is private and ignored by Git:
 - logs and local config files
 
 The indexer skips common credential files and redacts obvious token patterns before chunking. That is a safety net, not a permission slip. Do not index folders that contain secrets unless you understand what will be stored locally.
+
+To improve result quality, the indexer:
+
+- indexes memory and documentation-like files before raw sessions and source files;
+- skips noisy generated files such as package manager lockfiles;
+- caps chunks per file so one large session or source file cannot dominate the index;
+- writes UTF-8 JSON output, including on Windows consoles.
 
 Recommended roots:
 
@@ -127,6 +161,9 @@ Environment variables:
 | `CODEX_NPU_CONTEXT_INDEX_DIR` | `./index` | Local index path. |
 | `CODEX_NPU_CONTEXT_OV_CACHE_DIR` | `./ov_cache` | OpenVINO compile cache path. |
 | `CODEX_NPU_CONTEXT_PYTHON` | `.venv` Python | Python executable used by MCP. |
+| `CODEX_NPU_CONTEXT_PERFORMANCE_HINT` | unset | Optional OpenVINO `PERFORMANCE_HINT`, such as `LATENCY` or `THROUGHPUT`. |
+| `CODEX_NPU_CONTEXT_TIMEOUT_MS` | `240000` | MCP search request timeout. |
+| `CODEX_NPU_CONTEXT_STATUS_TIMEOUT_MS` | `60000` | MCP status request timeout. |
 
 ## Why NPU?
 
