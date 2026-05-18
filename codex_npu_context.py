@@ -107,8 +107,26 @@ def allow_npu_batch() -> bool:
     return os.environ.get("CODEX_NPU_CONTEXT_ALLOW_NPU_BATCH", "").strip().lower() in {"1", "true", "yes"}
 
 
+def allow_non_npu_device() -> bool:
+    return os.environ.get("CODEX_NPU_CONTEXT_ALLOW_NON_NPU", "").strip().lower() in {"1", "true", "yes"}
+
+
 def is_npu_device(device: str) -> bool:
     return device.upper().startswith("NPU")
+
+
+def filter_npu_devices(devices: list[str]) -> list[str]:
+    return [device for device in devices if is_npu_device(device)]
+
+
+def validate_npu_device(device: str) -> None:
+    if is_npu_device(device) or allow_non_npu_device():
+        return
+    raise SystemExit(
+        "codex-npu-context is NPU-only. "
+        f"Refusing OpenVINO device '{device}'. "
+        "Use an NPU device such as 'NPU' or set CODEX_NPU_CONTEXT_ALLOW_NON_NPU=1 for local diagnostics."
+    )
 
 
 def execution_shape(device: str, requested_batch_size: int, requested_parallelism: int = 1) -> tuple[int, int, str | None]:
@@ -147,6 +165,7 @@ def redact_secrets(text: str) -> str:
 class Qwen3OpenVinoEmbedder:
     def __init__(self, device: str = "NPU", batch_size: int = 1, parallelism: int = 1):
         ensure_model_exists()
+        validate_npu_device(device)
         self.device = device
         self.batch_size = max(1, int(batch_size))
         self.parallelism = max(1, int(parallelism))
@@ -159,11 +178,14 @@ class Qwen3OpenVinoEmbedder:
         ov_cache_dir().mkdir(parents=True, exist_ok=True)
         core.set_property({"CACHE_DIR": str(ov_cache_dir())})
         self.devices = core.available_devices
+        self.npu_devices = filter_npu_devices(self.devices)
 
-        if device not in self.devices and device != "AUTO":
+        allowed_devices = self.devices if allow_non_npu_device() else self.npu_devices
+        if device not in allowed_devices:
+            available_label = "OpenVINO" if allow_non_npu_device() else "NPU"
             raise SystemExit(
                 f"Requested OpenVINO device '{device}' is not available. "
-                f"Available devices: {', '.join(self.devices)}"
+                f"Available {available_label} devices: {', '.join(allowed_devices) if allowed_devices else 'none'}"
             )
 
         model = core.read_model(str(model_dir() / "openvino_model.xml"))
@@ -407,7 +429,7 @@ def build_index(args: argparse.Namespace) -> None:
     print(json.dumps({
         "ok": True,
         "device": args.device,
-        "available_devices": embedder.devices,
+        "available_npu_devices": embedder.npu_devices,
         "requested_batch_size": args.batch_size,
         "batch_size": embedder.batch_size,
         "parallelism": embedder.parallelism,
@@ -536,13 +558,17 @@ def search(args: argparse.Namespace) -> None:
 
 
 def status_payload(device: str, *, include_device_names: bool = False) -> dict:
+    validate_npu_device(device)
     core = ov.Core()
+    npu_devices = filter_npu_devices(core.available_devices)
     payload = {
+        "npu_only": True,
         "model_dir": str(model_dir()),
         "model_exists": all((model_dir() / name).exists() for name in ("openvino_model.xml", "openvino_model.bin", "tokenizer.json")),
         "index_dir": str(index_dir()),
         "index_exists": meta_path().exists() and emb_path().exists(),
-        "devices": core.available_devices,
+        "npu_devices": npu_devices,
+        "npu_available": bool(npu_devices),
         "preferred_device": device,
         "min_score": default_min_score(),
         "default_index_batch_size": default_index_batch_size(),
@@ -550,7 +576,7 @@ def status_payload(device: str, *, include_device_names: bool = False) -> dict:
         "compile_properties": compile_properties(),
     }
     if include_device_names:
-        for available_device in core.available_devices:
+        for available_device in npu_devices:
             try:
                 payload[f"{available_device}_name"] = core.get_property(available_device, "FULL_DEVICE_NAME")
             except Exception:
@@ -583,7 +609,9 @@ def benchmark_payload(
 ) -> dict:
     meta, vectors = load_index()
     queries = args.queries or DEFAULT_BENCH_QUERIES
-    devices = args.devices or [args.device]
+    devices = [args.device]
+    for device in devices:
+        validate_npu_device(device)
     batch_sizes = args.batch_sizes or DEFAULT_BENCH_BATCH_SIZES
     batch_sizes = [max(1, int(batch_size)) for batch_size in batch_sizes]
     iterations = max(1, args.iterations)
@@ -673,7 +701,7 @@ def benchmark_payload(
                     "batch_size": effective_batch_size,
                     "parallelism": embedder.parallelism,
                     "batch_note": batch_note,
-                    "available_devices": embedder.devices,
+                    "available_npu_devices": embedder.npu_devices,
                     "init_seconds": round(init_seconds, 3),
                     "compile_seconds": round(embedder.compile_seconds, 3),
                     "compile_properties": embedder.compile_properties,
@@ -778,7 +806,7 @@ class JsonLineWorker:
                 vectors=vectors,
             )
         if method == "benchmark":
-            requested_devices = params.get("devices") or [self.device]
+            requested_devices = [self.device]
             if self.device in requested_devices and self.embedder is None:
                 self.embedder = Qwen3OpenVinoEmbedder(self.device)
             bench_args = argparse.Namespace(
@@ -867,7 +895,6 @@ def main() -> None:
 
     bench_p = sub.add_parser("bench", help="Benchmark query embedding/search latency against the current index.")
     add_legacy_device_flag(bench_p)
-    bench_p.add_argument("--devices", nargs="+", help="Devices to compare, for example: NPU CPU")
     bench_p.add_argument("--iterations", type=int, default=20)
     bench_p.add_argument("--warmup", type=int, default=2)
     bench_p.add_argument("--sustain-seconds", type=float, default=0)

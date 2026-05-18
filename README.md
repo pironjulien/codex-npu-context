@@ -10,14 +10,14 @@ Most current laptops include an NPU, but developer tools rarely use it. Local se
 
 - context stays on your machine;
 - cloud embedding APIs are not required;
-- the CPU and GPU remain available for coding, browsers, and builds;
+- the main system processors remain available for coding, browsers, and builds;
 - a small embedding model can answer "where did we solve this before?" quickly after warmup.
 
 ## What It Does
 
 - Indexes local folders such as Codex sessions, project docs, runbooks, and architecture notes.
 - Creates embeddings with `OpenVINO/Qwen3-Embedding-0.6B-int8-ov`.
-- Compiles the model with fixed `[batch, 256]` shapes. Interactive search uses batch 1. Indexing and benchmarks can use larger batches where the OpenVINO device supports them.
+- Compiles the model with fixed `[batch, 256]` shapes for Intel NPU. Interactive search uses batch 1.
 - Keeps NPU batch shapes above 1 disabled by default because some NPU driver/model combinations crash on fixed batch > 1. For NPU indexing and benchmarks, requested batch sizes are mapped to batch 1 plus async parallel requests unless you explicitly opt into experimental NPU batching.
 - Exposes search, status, and benchmark tools to MCP clients.
 - Keeps generated indexes, model files, caches, logs, and local config out of Git.
@@ -40,12 +40,12 @@ Bad use cases:
 
 ## Requirements
 
-- Windows 11 with Intel NPU / Intel AI Boost recommended.
+- Windows 11 with Intel NPU / Intel AI Boost.
 - Python 3.11.
 - Node.js 20+ for the MCP server.
 - Git.
 
-CPU fallback works with `--device CPU`. The intended path is `NPU`.
+This project is NPU-only. Non-NPU OpenVINO devices are refused by default.
 
 ## Install
 
@@ -103,24 +103,24 @@ Search with a stricter confidence threshold:
 .\scripts\search.ps1 "old rollback command for the local service" -MinScore 0.55
 ```
 
-Benchmark NPU vs CPU query embedding/search latency:
+Benchmark NPU query embedding/search latency:
 
 ```powershell
-.\scripts\benchmark.ps1 -Devices NPU,CPU -Iterations 30
+.\scripts\benchmark.ps1 -Iterations 30
 ```
 
 Benchmark batch sizes:
 
 ```powershell
-.\scripts\benchmark.ps1 -Devices NPU -BatchSizes 1,4,8,16 -Iterations 64
+.\scripts\benchmark.ps1 -BatchSizes 1,4,8,16 -Iterations 64
 ```
 
-On NPU, batch sizes above 1 are treated as async parallelism by default. On CPU/GPU, they are compiled as real fixed batch shapes.
+Batch sizes above 1 are treated as NPU async parallelism by default. True fixed NPU batch shapes remain experimental and opt-in because some driver/model combinations crash.
 
 Keep the NPU busy long enough to see activity in Task Manager:
 
 ```powershell
-.\scripts\benchmark.ps1 -Devices NPU -SustainSeconds 30 -Iterations 1
+.\scripts\benchmark.ps1 -SustainSeconds 30 -Iterations 1
 ```
 
 Status:
@@ -232,7 +232,7 @@ Environment variables:
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `CODEX_NPU_CONTEXT_DEVICE` | `NPU` | OpenVINO device: `NPU`, `CPU`, `GPU`, or `AUTO`. |
+| `CODEX_NPU_CONTEXT_DEVICE` | `NPU` | OpenVINO NPU target, for example `NPU`. Non-NPU devices are refused by default. |
 | `CODEX_NPU_CONTEXT_MODEL_DIR` | `./models/qwen3-embedding-0.6b-int8-ov` | Local OpenVINO model path. |
 | `CODEX_NPU_CONTEXT_INDEX_DIR` | `./index` | Local index path. |
 | `CODEX_NPU_CONTEXT_OV_CACHE_DIR` | `./ov_cache` | OpenVINO compile cache path. |

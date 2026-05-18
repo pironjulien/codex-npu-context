@@ -187,15 +187,10 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
     },
     {
       name: "codex_npu_benchmark",
-      description: "Benchmark local query embedding/search latency through the persistent OpenVINO worker.",
+      description: "Benchmark local NPU query embedding/search latency through the persistent OpenVINO worker.",
       inputSchema: {
         type: "object",
         properties: {
-          devices: {
-            type: "array",
-            items: { type: "string" },
-            description: "OpenVINO devices to compare, for example ['NPU', 'CPU']. Defaults to the MCP device.",
-          },
           iterations: { type: "number", description: "Minimum measured query iterations.", default: 20 },
           warmup: { type: "number", description: "Warmup query iterations before measurement.", default: 2 },
           sustain_seconds: {
@@ -242,9 +237,6 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
   if (name === "codex_npu_benchmark") {
     const params = {};
-    if (Array.isArray(args.devices) && args.devices.length > 0) {
-      params.devices = args.devices.map((device) => String(device));
-    }
     if (Number.isFinite(Number(args.iterations))) {
       params.iterations = Math.max(1, Math.min(1000, Number(args.iterations)));
     }
