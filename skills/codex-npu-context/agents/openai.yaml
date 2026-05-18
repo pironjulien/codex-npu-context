@@ -1,0 +1,13 @@
+interface:
+  display_name: "Codex NPU Context"
+  short_description: "Retrieve local Codex context with NPU search"
+  default_prompt: "Use $codex-npu-context to find relevant local Codex context before editing."
+
+dependencies:
+  tools:
+    - type: "mcp"
+      value: "codex-npu-context"
+      description: "Local MCP server exposing codex_npu_status and codex_npu_search."
+
+policy:
+  allow_implicit_invocation: true

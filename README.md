@@ -160,18 +160,33 @@ CODEX_NPU_CONTEXT_PRELOAD = "1"
 
 ## Optional Codex Skill
 
-If your client supports skills, use a generic skill description like this:
+This repo includes an installable Codex skill at `skills/codex-npu-context`.
 
-```markdown
----
-name: codex-npu-context
-description: Use when a task would benefit from semantic retrieval over the user's local Codex context, prior Codex chats, indexed repositories, old decisions, errors, setup notes, or when exact filenames/keywords are unknown.
----
+Install it from this clone:
 
-Use the `codex_npu_search` MCP tool when local semantic context is more useful than exact keyword search. Treat returned paths and excerpts as leads, then verify important facts in the real files.
+```powershell
+.\scripts\install-skill.ps1
 ```
 
-A fuller generic skill template is available at `examples/codex-skill.md`.
+Overwrite an existing local copy:
+
+```powershell
+.\scripts\install-skill.ps1 -Force
+```
+
+Manual install is just a directory copy:
+
+```powershell
+$CodexHome = if ($env:CODEX_HOME) { $env:CODEX_HOME } else { Join-Path $env:USERPROFILE ".codex" }
+New-Item -ItemType Directory -Force (Join-Path $CodexHome "skills") | Out-Null
+Copy-Item -Recurse -Force .\skills\codex-npu-context (Join-Path $CodexHome "skills")
+```
+
+When using Codex's skill installer with GitHub, install repo `pironjulien/codex-npu-context` at path `skills/codex-npu-context`.
+
+Restart Codex after installing the skill. The skill assumes the MCP server above is already configured.
+
+The older template form is still available at `examples/codex-skill.md`.
 
 ## Privacy Model
 
