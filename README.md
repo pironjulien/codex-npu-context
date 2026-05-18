@@ -131,7 +131,21 @@ Status:
 
 ## Add To Codex
 
-Add this to your Codex MCP configuration, adjusting the path:
+Install the MCP configuration and optional skill into your Codex home:
+
+```powershell
+.\scripts\install-codex.ps1
+```
+
+Verify that Codex is configured to use this repo's MCP entrypoint and skill:
+
+```powershell
+.\scripts\verify-codex-install.ps1
+```
+
+Restart Codex after installation so MCP servers and skills are reloaded.
+
+Manual MCP configuration is also possible. Add this to your Codex MCP configuration, adjusting the path:
 
 ```toml
 [mcp_servers.codex-npu-context]
@@ -140,6 +154,16 @@ args = ["C:/path/to/codex-npu-context/mcp/index.js"]
 
 [mcp_servers.codex-npu-context.env]
 CODEX_NPU_CONTEXT_DEVICE = "NPU"
+```
+
+If you keep the Python virtual environment, model, index, or OpenVINO cache outside the repo, pass those paths when installing:
+
+```powershell
+.\scripts\install-codex.ps1 `
+  -Python "C:\path\to\.venv\Scripts\python.exe" `
+  -ModelDir "C:\path\to\models\qwen3-embedding-0.6b-int8-ov" `
+  -IndexDir "C:\path\to\index" `
+  -OvCacheDir "C:\path\to\ov_cache"
 ```
 
 The MCP server exposes:
