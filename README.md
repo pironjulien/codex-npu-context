@@ -2,7 +2,7 @@
 
 Private local semantic memory for Codex and other MCP clients, powered by Intel NPU and OpenVINO.
 
-The useful job is narrow and practical: index local notes, session history, runbooks, and project docs, then retrieve relevant context when you remember the idea but not the exact file, command, error, or decision. Exact symbol lookup still belongs to tools such as `rg`.
+The useful job is narrow and practical: run semantic NPU retrieval alongside exact search. `rg` catches concrete strings, symbols, filenames, commands, and errors. The NPU sidecar catches the context you remember vaguely but cannot name exactly.
 
 ## Why This Exists
 
@@ -11,12 +11,14 @@ Most current laptops include an NPU, but developer tools rarely use it. Local se
 - context stays on your machine;
 - cloud embedding APIs are not required;
 - the main system processors remain available for coding, browsers, and builds;
+- exact search and semantic search improve each other instead of competing;
 - a small embedding model can answer "where did we solve this before?" quickly after warmup.
 
 ## What It Does
 
 - Indexes local folders such as Codex sessions, project docs, runbooks, and architecture notes.
 - Creates embeddings with `OpenVINO/Qwen3-Embedding-0.6B-int8-ov`.
+- Gives Codex a semantic sidecar to run in parallel with exact `rg` search for vague local-memory lookups.
 - Compiles the model with fixed `[batch, 256]` shapes for Intel NPU. Interactive search uses batch 1.
 - Keeps NPU batch shapes above 1 disabled by default because some NPU driver/model combinations crash on fixed batch > 1. For NPU indexing and benchmarks, requested batch sizes are mapped to batch 1 plus async parallel requests unless you explicitly opt into experimental NPU batching.
 - Exposes search, status, and benchmark tools to MCP clients.
@@ -34,7 +36,7 @@ Good use cases:
 
 Bad use cases:
 
-- Exact class, function, or filename lookup. Use `rg`.
+- Exact class, function, or filename lookup by itself. Use `rg`; pair with NPU only when the wording, location, or prior context is uncertain.
 - Fresh repo changes that have not been indexed yet.
 - Questions where no local context exists. The default score threshold helps, but search results are still leads, not facts.
 
@@ -171,6 +173,14 @@ The MCP server exposes:
 - `codex_npu_status`
 - `codex_npu_search`
 - `codex_npu_benchmark`
+
+Recommended agent behavior:
+
+- For vague local-memory lookups, run `codex_npu_search` and exact `rg` search in parallel when concrete tokens exist.
+- Prefer `rg` for exact filenames, symbols, commands, error text, and potential secrets.
+- Prefer MCP results for semantic leads when the user remembers the idea but not the wording.
+- If MCP returns `no_confident_result` and `rg` has no hits, report no local confident match instead of inventing a lead.
+- Never print credential, token, password, or key values; report only safe file/path context.
 
 The MCP server keeps a persistent Python/OpenVINO worker alive after the first request. That avoids paying tokenizer/model/index startup and NPU compilation costs on every search. If the index files change, the worker reloads them automatically on the next query.
 

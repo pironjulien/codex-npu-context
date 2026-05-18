@@ -1,7 +1,7 @@
 {
   "name": "codex-npu-context",
   "version": "0.1.0",
-  "description": "Local semantic memory for Codex powered by Intel NPU and OpenVINO.",
+  "description": "Local semantic sidecar for Codex powered by Intel NPU and OpenVINO.",
   "type": "module",
   "private": false,
   "license": "MIT",

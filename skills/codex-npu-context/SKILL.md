@@ -18,13 +18,15 @@ Good triggers:
 Workflow:
 
 1. Call `codex_npu_status` if you need to confirm the index exists.
-2. Call `codex_npu_search` with a concise natural-language query.
-3. Treat returned paths and excerpts as leads.
-4. Read the real files before editing or making claims.
-5. If `status` is `no_confident_result` or `has_confident_result` is false, say the local index does not have a confident match and fall back to exact search or ask to rebuild the index.
+2. For vague local-memory lookups, run `codex_npu_search` with a concise natural-language query and, when concrete tokens exist, run `rg` exact search for those tokens in parallel.
+3. Prefer `rg` for exact strings, symbols, filenames, commands, error text, and potential secrets.
+4. Prefer MCP results for semantic leads when exact terms are missing, ambiguous, or too generic.
+5. Treat returned paths and excerpts as leads, then read the real files before editing or making claims.
+6. If MCP returns `no_confident_result` and exact search has no hits, say there is no local confident match and ask to re-index or search another source.
 
 Important:
 
 - This is a retrieval aid, not a source of truth.
 - Use `rg` for exact strings, symbols, and filenames.
+- Never print secret values. For credentials, tokens, passwords, or keys, report only the path and safe context unless the user explicitly asks to inspect the secret source.
 - Rebuild the index after important new sessions, repo changes, or notes.
