@@ -1,6 +1,6 @@
 ---
 name: codex-npu-context
-description: Use when a task would benefit from semantic retrieval over the user's local Codex context, prior Codex chats, indexed repositories, old decisions, errors, setup notes, or when exact filenames/keywords are unknown.
+description: Use when a task is vague, underspecified, or would benefit from semantic retrieval over the user's local Codex context, prior Codex chats, indexed repositories, old decisions, errors, setup notes, or when exact filenames/keywords are unknown.
 ---
 
 # Codex NPU Context
@@ -10,6 +10,7 @@ Use `codex_npu_search` when local semantic context is more useful than exact key
 Good triggers:
 
 - The user asks to retrieve prior decisions, old Codex chats, setup details, or "what did we do before?"
+- The user describes something vaguely, from memory, or without the exact file, symbol, command, error text, or keyword.
 - The relevant file name or exact keyword is uncertain.
 - A task spans multiple repos, local tooling, setup notes, debugging history, or Codex config.
 - `rg` is likely to miss synonyms or conversational context.
