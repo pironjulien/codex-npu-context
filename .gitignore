@@ -1,0 +1,24 @@
+.venv/
+node_modules/
+__pycache__/
+*.py[cod]
+
+# Local private data and generated artifacts.
+index/
+models/
+ov_cache/
+*.npy
+*.jsonl
+*.log
+
+# Local configuration.
+.env
+.env.*
+config.local.json
+roots.local.txt
+
+# OS/editor noise.
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

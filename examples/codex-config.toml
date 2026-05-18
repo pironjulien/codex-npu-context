@@ -1,0 +1,9 @@
+# Example Codex MCP configuration.
+# Adjust the path to your local clone.
+
+[mcp_servers.codex-npu-context]
+command = "node"
+args = ["C:/path/to/codex-npu-context/mcp/index.js"]
+
+[mcp_servers.codex-npu-context.env]
+CODEX_NPU_CONTEXT_DEVICE = "NPU"

@@ -1,0 +1,17 @@
+{
+  "name": "codex-npu-context",
+  "version": "0.1.0",
+  "description": "Local semantic memory for Codex powered by Intel NPU and OpenVINO.",
+  "type": "module",
+  "private": false,
+  "license": "MIT",
+  "bin": {
+    "codex-npu-context-mcp": "./mcp/index.js"
+  },
+  "scripts": {
+    "mcp": "node ./mcp/index.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.21.1"
+  }
+}
