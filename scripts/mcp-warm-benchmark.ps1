@@ -4,7 +4,8 @@ param(
     [string]$Query = "portable install Codex MCP runtime",
     [int]$Iterations = 20,
     [int]$TopK = 3,
-    [double]$MinScore = 0.3
+    [double]$MinScore = 0.3,
+    [int]$QueryCacheSize = 128
 )
 
 $ErrorActionPreference = "Stop"
@@ -36,6 +37,7 @@ $Payload = @{
     iterations = $Iterations
     topK = $TopK
     minScore = $MinScore
+    queryCacheSize = $QueryCacheSize
 } | ConvertTo-Json -Compress
 
 $Js = @'
@@ -53,6 +55,7 @@ const child = spawn("node", [input.mcpEntry], {
     CODEX_NPU_CONTEXT_MODEL_DIR: input.modelDir,
     CODEX_NPU_CONTEXT_INDEX_DIR: input.indexDir,
     CODEX_NPU_CONTEXT_OV_CACHE_DIR: input.ovCacheDir,
+    CODEX_NPU_CONTEXT_QUERY_CACHE_SIZE: String(input.queryCacheSize),
     CODEX_NPU_CONTEXT_TIMEOUT_MS: process.env.CODEX_NPU_CONTEXT_TIMEOUT_MS || "240000",
     CODEX_NPU_CONTEXT_STATUS_TIMEOUT_MS: process.env.CODEX_NPU_CONTEXT_STATUS_TIMEOUT_MS || "120000",
   },
@@ -165,6 +168,7 @@ const timer = setTimeout(() => {
       wall_ms: Number(wallMs.toFixed(3)),
       embed_ms: payload.timings_ms?.embed_ms ?? null,
       rank_ms: payload.timings_ms?.rank_ms ?? null,
+      query_cache_hit: payload.query_cache_hit === true,
       best_score: payload.best_score ?? null,
       status: payload.status,
       has_confident_result: payload.has_confident_result,
@@ -187,9 +191,11 @@ const timer = setTimeout(() => {
     iterations: input.iterations,
     chunks: statusBefore.chunks,
     embeddings_shape: statusBefore.embeddings_shape,
+    query_cache_size: statusBefore.query_cache_size,
     first_call: first,
     warm_calls: {
       count: warm.length,
+      cache_hits: warm.filter((sample) => sample.query_cache_hit).length,
       wall_ms: stats(warm.map((sample) => sample.wall_ms)),
       embed_ms: stats(warm.map((sample) => sample.embed_ms).filter((value) => Number.isFinite(value))),
       rank_ms: stats(warm.map((sample) => sample.rank_ms).filter((value) => Number.isFinite(value))),

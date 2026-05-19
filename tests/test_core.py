@@ -260,5 +260,29 @@ class QualityMetricTests(unittest.TestCase):
         self.assertEqual(merged[0]["source"], "both")
 
 
+class WorkerQueryCacheTests(unittest.TestCase):
+    def test_worker_reuses_cached_query_embedding(self):
+        class FakeEmbedder:
+            def __init__(self):
+                self.count = 0
+
+            def embed_one(self, query, *, is_query=False):
+                self.count += 1
+                return f"vector:{query}:{self.count}"
+
+        worker = ctx.JsonLineWorker("NPU")
+        worker.query_cache_size = 2
+        fake = FakeEmbedder()
+        worker.embedder = fake
+
+        first, first_hit, _ = worker.get_query_vector("same query")
+        second, second_hit, _ = worker.get_query_vector("same query")
+
+        self.assertFalse(first_hit)
+        self.assertTrue(second_hit)
+        self.assertEqual(first, second)
+        self.assertEqual(fake.count, 1)
+
+
 if __name__ == "__main__":
     unittest.main()

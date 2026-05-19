@@ -9,6 +9,7 @@ import subprocess
 import sys
 import time
 import traceback
+from collections import OrderedDict
 from pathlib import Path
 
 from codex_npu_context_core.chunking import chunk_records, chunk_text
@@ -151,6 +152,9 @@ def search_payload(
     embedder: Qwen3OpenVinoEmbedder | None = None,
     meta: list[dict] | None = None,
     vectors: np.ndarray | None = None,
+    query_vector: np.ndarray | None = None,
+    query_cache_hit: bool = False,
+    query_embed_ms: float | None = None,
 ) -> dict:
     if not query.strip():
         raise SystemExit("Query is required.")
@@ -167,9 +171,12 @@ def search_payload(
         meta, vectors = load_index()
         timings["load_index_ms"] = round((time.perf_counter() - started) * 1000, 3)
 
-    started = time.perf_counter()
-    query_vector = embedder.embed_one(query, is_query=True)
-    timings["embed_ms"] = round((time.perf_counter() - started) * 1000, 3)
+    if query_vector is None:
+        started = time.perf_counter()
+        query_vector = embedder.embed_one(query, is_query=True)
+        timings["embed_ms"] = round((time.perf_counter() - started) * 1000, 3)
+    else:
+        timings["embed_ms"] = round(float(query_embed_ms or 0.0), 3)
     effective_min_score = default_min_score() if min_score is None else min_score
     results, rank_seconds, best_score = result_rows(meta, vectors, query_vector, top_k, preview_chars, effective_min_score)
     timings["rank_ms"] = round(rank_seconds * 1000, 3)
@@ -184,6 +191,7 @@ def search_payload(
         "min_score": effective_min_score,
         "best_score": round(best_score, 4) if best_score is not None else None,
         "has_confident_result": has_confident_result,
+        "query_cache_hit": query_cache_hit,
         "timings_ms": timings,
         "results": results,
     }
@@ -201,6 +209,9 @@ def dual_search_payload(
     embedder: Qwen3OpenVinoEmbedder | None = None,
     meta: list[dict] | None = None,
     vectors: np.ndarray | None = None,
+    query_vector: np.ndarray | None = None,
+    query_cache_hit: bool = False,
+    query_embed_ms: float | None = None,
 ) -> dict:
     semantic = search_payload(
         query,
@@ -211,6 +222,9 @@ def dual_search_payload(
         embedder=embedder,
         meta=meta,
         vectors=vectors,
+        query_vector=query_vector,
+        query_cache_hit=query_cache_hit,
+        query_embed_ms=query_embed_ms,
     )
     exact = run_rg_search(rg, roots)
     merged = merge_dual_results(semantic["results"], exact["results"], top_k)
@@ -686,6 +700,8 @@ class JsonLineWorker:
         self.meta: list[dict] | None = None
         self.vectors: np.ndarray | None = None
         self.index_signature: tuple[float, int, float, int] | None = None
+        self.query_cache_size = max(0, int(os.environ.get("CODEX_NPU_CONTEXT_QUERY_CACHE_SIZE", "128")))
+        self.query_cache: OrderedDict[str, np.ndarray] = OrderedDict()
 
     def get_embedder(self) -> Qwen3OpenVinoEmbedder:
         if self.embedder is None:
@@ -705,12 +721,30 @@ class JsonLineWorker:
             self.index_signature = signature
         return self.meta, self.vectors
 
+    def get_query_vector(self, query: str) -> tuple[np.ndarray, bool, float]:
+        key = query.strip()
+        started = time.perf_counter()
+        if self.query_cache_size > 0 and key in self.query_cache:
+            vector = self.query_cache.pop(key)
+            self.query_cache[key] = vector
+            return vector, True, (time.perf_counter() - started) * 1000
+
+        vector = self.get_embedder().embed_one(query, is_query=True)
+        elapsed_ms = (time.perf_counter() - started) * 1000
+        if self.query_cache_size > 0:
+            self.query_cache[key] = vector
+            while len(self.query_cache) > self.query_cache_size:
+                self.query_cache.popitem(last=False)
+        return vector, False, elapsed_ms
+
     def handle(self, method: str, params: dict) -> dict:
         if method == "status":
             payload = status_payload(self.device, include_device_names=bool(params.get("device_names", False)))
             payload["worker"] = "persistent"
             payload["model_loaded"] = self.embedder is not None
             payload["index_loaded"] = self.meta is not None and self.vectors is not None
+            payload["query_cache_size"] = self.query_cache_size
+            payload["query_cache_entries"] = len(self.query_cache)
             return payload
         if method == "preload":
             meta, vectors = self.get_index()
@@ -725,10 +759,13 @@ class JsonLineWorker:
             }
         if method == "search":
             query = str(params.get("query", "")).strip()
+            if not query:
+                raise SystemExit("Query is required.")
             top_k = int(params.get("top_k", 8))
             preview_chars = int(params.get("preview_chars", 600))
             min_score = float(params.get("min_score", default_min_score()))
             meta, vectors = self.get_index()
+            query_vector, cache_hit, embed_ms = self.get_query_vector(query)
             return search_payload(
                 query,
                 device=self.device,
@@ -738,15 +775,21 @@ class JsonLineWorker:
                 embedder=self.get_embedder(),
                 meta=meta,
                 vectors=vectors,
+                query_vector=query_vector,
+                query_cache_hit=cache_hit,
+                query_embed_ms=embed_ms,
             )
         if method == "dual_search":
             query = str(params.get("query", "")).strip()
+            if not query:
+                raise SystemExit("Query is required.")
             top_k = int(params.get("top_k", 8))
             preview_chars = int(params.get("preview_chars", 600))
             min_score = float(params.get("min_score", default_min_score()))
             roots = params.get("roots") if isinstance(params.get("roots"), list) else None
             rg = str(params.get("rg", "")).strip() or None
             meta, vectors = self.get_index()
+            query_vector, cache_hit, embed_ms = self.get_query_vector(query)
             return dual_search_payload(
                 query,
                 device=self.device,
@@ -758,6 +801,9 @@ class JsonLineWorker:
                 embedder=self.get_embedder(),
                 meta=meta,
                 vectors=vectors,
+                query_vector=query_vector,
+                query_cache_hit=cache_hit,
+                query_embed_ms=embed_ms,
             )
         if method == "benchmark":
             requested_devices = [self.device]

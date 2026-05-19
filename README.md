@@ -367,7 +367,7 @@ Keep the NPU busy long enough to see activity in Task Manager:
 .\scripts\benchmark.ps1 -SustainSeconds 30 -Iterations 1
 ```
 
-On the maintainer setup, the real MCP worker answers warm NPU searches in roughly 200 ms. That number depends on the machine, model cache state, index size, and driver.
+On the maintainer setup, the real MCP worker answers warm NPU searches in roughly 200 ms before query-cache hits. Repeated identical queries can be much faster because the persistent worker caches query embeddings. That number depends on the machine, model cache state, index size, and driver.
 
 Quality benchmark for labeled retrieval cases:
 
@@ -413,6 +413,7 @@ The CI does not claim NPU validation. NPU install, MCP smoke, warm benchmark, an
 - `has_confident_result`: false when all matches are below `min_score`;
 - `best_score`: the best raw score, even when no result passes the threshold;
 - `results`: filtered matches above `min_score`;
+- `query_cache_hit`: true when the persistent MCP worker reused a cached query embedding;
 - `timings_ms`: model, index, embedding, and ranking timings where applicable.
 
 This makes absence easier to detect than a raw nearest-neighbor list.
@@ -474,6 +475,7 @@ Avoid:
 | `CODEX_NPU_CONTEXT_ALLOW_NPU_BATCH` | unset | Set to `1` to try true NPU batch shapes above 1. Experimental; batch > 1 can crash some drivers. |
 | `CODEX_NPU_CONTEXT_PRELOAD` | unset | Set to `1` to load the index and compile the model when MCP starts. |
 | `CODEX_NPU_CONTEXT_PERFORMANCE_HINT` | unset | Optional OpenVINO `PERFORMANCE_HINT`, such as `LATENCY` or `THROUGHPUT`. |
+| `CODEX_NPU_CONTEXT_QUERY_CACHE_SIZE` | `128` | Number of query embeddings cached in the persistent MCP worker. Set `0` to disable. |
 | `CODEX_NPU_CONTEXT_TIMEOUT_MS` | `240000` | MCP search request timeout. |
 | `CODEX_NPU_CONTEXT_STATUS_TIMEOUT_MS` | `60000` | MCP status request timeout. |
 
