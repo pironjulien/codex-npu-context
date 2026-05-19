@@ -392,14 +392,16 @@ This reports recall@k and MRR for semantic-only, exact-only, and hybrid retrieva
 
 The same quality benchmark is exposed through MCP as `codex_npu_quality_benchmark`.
 
-## CI
+## CI Template
 
-GitHub Actions runs a Windows no-NPU safety suite on pushes and pull requests:
+`examples/github-actions-ci.yml` is a Windows no-NPU safety suite template for pushes and pull requests:
 
 - `npm ci`;
 - editable Python package install without hardware dependencies;
 - `scripts/self-test.ps1`;
 - `scripts/index-codex-memory.ps1 -WhatIfOnly` against a temporary Codex home.
+
+To enable it on GitHub, copy it to `.github/workflows/ci.yml` with a GitHub token that has `workflow` scope.
 
 The CI does not claim NPU validation. NPU install, MCP smoke, warm benchmark, and OpenVINO device validation remain local Windows + Intel NPU checks.
 
