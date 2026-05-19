@@ -9,6 +9,8 @@ jobs:
   test:
     name: Windows packaging and tests
     runs-on: windows-latest
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
 
     steps:
       - name: Checkout
@@ -41,7 +43,7 @@ jobs:
       - name: Validate Codex memory index script plan
         shell: pwsh
         run: |
-          $home = Join-Path $env:RUNNER_TEMP "codex-home"
-          New-Item -ItemType Directory -Force (Join-Path $home "memories") | Out-Null
-          "local memory smoke" | Set-Content -Path (Join-Path $home "memories\sample.md") -Encoding utf8
-          .\scripts\index-codex-memory.ps1 -CodexHome $home -WhatIfOnly
+          $codexHome = Join-Path $env:RUNNER_TEMP "codex-home"
+          New-Item -ItemType Directory -Force (Join-Path $codexHome "memories") | Out-Null
+          "local memory smoke" | Set-Content -Path (Join-Path $codexHome "memories\sample.md") -Encoding utf8
+          .\scripts\index-codex-memory.ps1 -CodexHome $codexHome -WhatIfOnly
