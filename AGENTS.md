@@ -177,11 +177,15 @@ Do not index these without explicit user approval:
 For user-approved real memory indexing, prefer durable notes before raw sessions:
 
 ```powershell
-.\scripts\index-example.ps1 -Roots `
-  "$env:USERPROFILE\.codex\memories", `
-  "$env:USERPROFILE\.codex\sessions" `
-  -MaxChunks 1200 `
-  -MaxChunksPerFile 120
+.\scripts\index-codex-memory.ps1
+```
+
+This keeps the runtime README/skill in the index plus `~/.codex/memories`, so MCP smoke validation remains available after rebuilding user memory.
+
+Only include raw Codex sessions when the user explicitly asks:
+
+```powershell
+.\scripts\index-codex-memory.ps1 -IncludeSessions
 ```
 
 ## Verification Before Success

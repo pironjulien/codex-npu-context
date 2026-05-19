@@ -1,0 +1,47 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    name: Windows packaging and tests
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+
+      - name: Install Node dependencies
+        run: npm ci
+
+      - name: Install Python package without hardware dependencies
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e . --no-deps
+
+      - name: Run self-test without NPU
+        shell: pwsh
+        run: .\scripts\self-test.ps1
+
+      - name: Validate Codex memory index script plan
+        shell: pwsh
+        run: |
+          $home = Join-Path $env:RUNNER_TEMP "codex-home"
+          New-Item -ItemType Directory -Force (Join-Path $home "memories") | Out-Null
+          "local memory smoke" | Set-Content -Path (Join-Path $home "memories\sample.md") -Encoding utf8
+          .\scripts\index-codex-memory.ps1 -CodexHome $home -WhatIfOnly

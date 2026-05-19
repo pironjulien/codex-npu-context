@@ -183,15 +183,22 @@ Preflight the same roots before indexing:
 For a stronger Codex memory setup, index durable notes before raw sessions:
 
 ```powershell
-.\scripts\index-example.ps1 -Roots `
-  "$env:USERPROFILE\.codex\memories", `
-  "$env:USERPROFILE\.codex\sessions", `
-  "$env:USERPROFILE\Documents\project-notes" `
-  -MaxChunks 1200 `
-  -MaxChunksPerFile 120 `
-  -BatchSize 8 `
-  -Parallelism 1
+.\scripts\index-codex-memory.ps1
 ```
+
+That script scans secrets first, indexes this runtime's safe README/skill plus `~/.codex/memories`, uses the NPU by default, and keeps incremental rebuilds enabled. Keeping the runtime docs in the index preserves the MCP smoke-test proof after a memory rebuild. Add raw sessions only when explicitly wanted:
+
+```powershell
+.\scripts\index-codex-memory.ps1 -IncludeSessions
+```
+
+Add extra approved notes or runbooks with:
+
+```powershell
+.\scripts\index-codex-memory.ps1 -ExtraRoots "$env:USERPROFILE\Documents\project-notes"
+```
+
+Use `-SkipRuntimeDocs` only when you intentionally want a memory-only index and do not need `mcp-smoke.ps1` to prove the README-based hybrid case.
 
 NPU batch shapes above 1 are disabled by default because some NPU driver/model combinations crash on fixed batch > 1. For NPU indexing and benchmarks, requested batch sizes are mapped to batch 1 plus async parallel requests unless you explicitly opt into experimental NPU batching.
 
@@ -384,6 +391,17 @@ Run:
 This reports recall@k and MRR for semantic-only, exact-only, and hybrid retrieval. It is a quality benchmark, not a latency benchmark.
 
 The same quality benchmark is exposed through MCP as `codex_npu_quality_benchmark`.
+
+## CI
+
+GitHub Actions runs a Windows no-NPU safety suite on pushes and pull requests:
+
+- `npm ci`;
+- editable Python package install without hardware dependencies;
+- `scripts/self-test.ps1`;
+- `scripts/index-codex-memory.ps1 -WhatIfOnly` against a temporary Codex home.
+
+The CI does not claim NPU validation. NPU install, MCP smoke, warm benchmark, and OpenVINO device validation remain local Windows + Intel NPU checks.
 
 ## Output Contract
 
