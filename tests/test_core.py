@@ -138,6 +138,17 @@ class SecretScanTests(unittest.TestCase):
         self.assertTrue(any(finding["kind"] == "HIGH_ENTROPY_TOKEN" for finding in findings))
         self.assertNotIn(token, findings[0]["preview"])
 
+    def test_entropy_scan_ignores_readable_policy_and_note_paths(self):
+        text = (
+            "policy WebRtcIPHandlingPolicy=disable_non_proxied_udp\n"
+            "rollout_path=extensions/ad_hoc/notes/2026-05-18T10-10-49-pcportable-us-proxy-tailscale.md\n"
+            "doc C:\\Users\\julie\\OneDrive\\Documents\\codex nexus\\NEXUS_APP_CONNECTOR_SIMPLIFICATION_2026-05-19.md\n"
+        )
+
+        findings = ctx.secret_findings_for_text(Path("sample.txt"), text)
+
+        self.assertEqual(findings, [])
+
     def test_secrets_module_is_directly_importable(self):
         self.assertIn("[REDACTED_GITHUB_TOKEN]", secrets.redact_secrets("ghp_abcdefghijklmnopqrstuvwxyz123456"))
 

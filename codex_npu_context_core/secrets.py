@@ -36,7 +36,13 @@ def looks_like_secret_token(value: str) -> bool:
         return False
     if value.startswith("OpenVINO/"):
         return False
+    if re.match(r"^[A-Za-z][A-Za-z0-9_.-]+=[A-Za-z0-9_.-]+$", value):
+        return False
     if re.match(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$", value):
+        return False
+    if re.search(r"\.(md|txt|json|toml|yaml|yml|py|js|ts|ps1)$", value, re.IGNORECASE) and not re.search(r"[+=]", value):
+        return False
+    if re.search(r"[/\\]", value) and re.search(r"\.(md|txt|json|toml|yaml|yml|py|js|ts|ps1)$", value, re.IGNORECASE):
         return False
     classes = sum([
         any(char.islower() for char in value),
