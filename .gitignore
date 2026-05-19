@@ -2,6 +2,7 @@
 node_modules/
 __pycache__/
 *.py[cod]
+*.egg-info/
 
 # Local private data and generated artifacts.
 index/

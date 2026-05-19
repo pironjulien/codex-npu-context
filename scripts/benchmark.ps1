@@ -29,4 +29,31 @@ if ($Queries.Count -gt 0) {
     $Args += $Queries
 }
 
-& $Python @Args
+$Output = & $Python @Args
+$Output | Write-Output
+
+try {
+    $Payload = $Output | ConvertFrom-Json
+} catch {
+    throw "Benchmark did not return valid JSON."
+}
+
+if (!$Payload.ok) {
+    throw "Benchmark payload reported ok=false."
+}
+
+$Runs = @()
+foreach ($DevicePayload in @($Payload.devices)) {
+    $Runs += @($DevicePayload.batch_runs)
+}
+
+if ($Runs.Count -eq 0) {
+    throw "Benchmark returned no batch runs."
+}
+
+$FailedRuns = @($Runs | Where-Object { $_.error })
+$SuccessfulRuns = @($Runs | Where-Object { !$_.error -and $_.queries_per_second })
+
+if ($FailedRuns.Count -gt 0 -and $SuccessfulRuns.Count -eq 0) {
+    throw "Benchmark failed: all batch runs returned errors."
+}

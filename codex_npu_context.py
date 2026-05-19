@@ -1,295 +1,64 @@
+from __future__ import annotations
+
 import argparse
 import json
 import os
-import re
+import platform
+import shutil
+import subprocess
 import sys
 import time
 import traceback
 from pathlib import Path
 
-import numpy as np
-import openvino as ov
-from transformers import AutoTokenizer
+from codex_npu_context_core.chunking import chunk_records, chunk_text
+from codex_npu_context_core.config import (
+    DEFAULT_MIN_SCORE,
+    DEFAULT_RG_MAX_RESULTS,
+    DEFAULT_RG_TIMEOUT_SECONDS,
+    INDEX_FORMAT_VERSION,
+    MAX_LEN,
+    ROOT,
+    allow_npu_batch,
+    allow_non_npu_device,
+    compile_properties,
+    default_index_batch_size,
+    default_min_score,
+    emb_path,
+    execution_shape,
+    filter_npu_devices,
+    index_dir,
+    is_npu_device,
+    manifest_path,
+    meta_path,
+    model_dir,
+    ov_cache_dir,
+    validate_npu_device,
+)
+from codex_npu_context_core.files import file_sha256, iter_files, read_text, scan_secrets_payload
+from codex_npu_context_core.indexer import (
+    assemble_vectors,
+    build_existing_file_cache,
+    collect_index_chunks,
+    index_settings,
+    load_manifest,
+    write_manifest,
+)
+from codex_npu_context_core.metrics import retrieval_metrics, summarize_metric_rows
+from codex_npu_context_core.openvino_embedder import Qwen3OpenVinoEmbedder, ensure_runtime_dependencies
+from codex_npu_context_core.retrieval import merge_dual_results, run_rg_search
+from codex_npu_context_core.search import result_rows
+from codex_npu_context_core.secrets import redact_secrets, secret_findings_for_text
 
+try:
+    import numpy as np
+except ModuleNotFoundError:
+    np = None
 
-ROOT = Path(__file__).resolve().parent
-DEFAULT_MODEL_DIR = ROOT / "models" / "qwen3-embedding-0.6b-int8-ov"
-DEFAULT_INDEX_DIR = ROOT / "index"
-MAX_LEN = 256
-DEFAULT_MIN_SCORE = 0.45
-DEFAULT_INDEX_BATCH_SIZE = 8
-DEFAULT_BENCH_BATCH_SIZES = [1, 4, 8, 16]
-
-DEFAULT_EXTENSIONS = {
-    ".py", ".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs", ".ps1", ".psm1",
-    ".md", ".txt", ".json", ".jsonl", ".toml", ".yaml", ".yml", ".html",
-    ".css", ".scss", ".rs", ".go", ".java", ".kt", ".cs", ".cpp", ".c",
-    ".h", ".hpp", ".sql", ".sh", ".bat",
-}
-
-SKIP_PARTS = {
-    ".git", ".hg", ".svn", "node_modules", ".venv", "venv", "__pycache__",
-    "dist", "build", ".next", ".turbo", "coverage", "models", "ov_cache", "index",
-    ".pytest_cache", ".ruff_cache", ".mypy_cache", "target", "bin", "obj",
-}
-
-SENSITIVE_FILE_NAMES = {
-    ".env", "auth.json", "credentials.json", "cookies.json", "secrets.json",
-    "id_rsa", "id_ed25519", "known_hosts", "token", "tokens.json",
-}
-
-NOISY_FILE_NAMES = {
-    "package-lock.json", "pnpm-lock.yaml", "yarn.lock", "bun.lockb",
-    "poetry.lock", "uv.lock", "cargo.lock",
-}
-
-SECRET_PATTERNS = [
-    (re.compile(r"gh[pousr]_[A-Za-z0-9_]{20,}"), "GITHUB_TOKEN"),
-    (re.compile(r"sk-[A-Za-z0-9_-]{20,}"), "API_KEY"),
-    (re.compile(r"(?i)(api[_-]?key|access[_-]?token|refresh[_-]?token|password|secret)\s*[:=]\s*[\"']?[^\"'\s,}]{8,}"), "SECRET_ASSIGNMENT"),
-    (re.compile(r"(?i)bearer\s+[A-Za-z0-9._~+/-]+=*"), "BEARER_TOKEN"),
-]
-
-
-def env_path(name: str, default: Path) -> Path:
-    value = os.environ.get(name)
-    return Path(value).expanduser().resolve() if value else default
-
-
-def model_dir() -> Path:
-    return env_path("CODEX_NPU_CONTEXT_MODEL_DIR", DEFAULT_MODEL_DIR)
-
-
-def index_dir() -> Path:
-    return env_path("CODEX_NPU_CONTEXT_INDEX_DIR", DEFAULT_INDEX_DIR)
-
-
-def meta_path() -> Path:
-    return index_dir() / "chunks.jsonl"
-
-
-def emb_path() -> Path:
-    return index_dir() / "embeddings.npy"
-
-
-def ov_cache_dir() -> Path:
-    return env_path("CODEX_NPU_CONTEXT_OV_CACHE_DIR", ROOT / "ov_cache")
-
-
-def compile_properties() -> dict[str, str]:
-    performance_hint = os.environ.get("CODEX_NPU_CONTEXT_PERFORMANCE_HINT", "").strip().upper()
-    if not performance_hint:
-        return {}
-    return {"PERFORMANCE_HINT": performance_hint}
-
-
-def default_min_score() -> float:
-    value = os.environ.get("CODEX_NPU_CONTEXT_MIN_SCORE")
-    if value is None:
-        return DEFAULT_MIN_SCORE
-    try:
-        return float(value)
-    except ValueError:
-        return DEFAULT_MIN_SCORE
-
-
-def default_index_batch_size() -> int:
-    value = os.environ.get("CODEX_NPU_CONTEXT_INDEX_BATCH_SIZE")
-    if value is None:
-        return DEFAULT_INDEX_BATCH_SIZE
-    try:
-        return max(1, int(value))
-    except ValueError:
-        return DEFAULT_INDEX_BATCH_SIZE
-
-
-def allow_npu_batch() -> bool:
-    return os.environ.get("CODEX_NPU_CONTEXT_ALLOW_NPU_BATCH", "").strip().lower() in {"1", "true", "yes"}
-
-
-def allow_non_npu_device() -> bool:
-    return os.environ.get("CODEX_NPU_CONTEXT_ALLOW_NON_NPU", "").strip().lower() in {"1", "true", "yes"}
-
-
-def is_npu_device(device: str) -> bool:
-    return device.upper().startswith("NPU")
-
-
-def filter_npu_devices(devices: list[str]) -> list[str]:
-    return [device for device in devices if is_npu_device(device)]
-
-
-def validate_npu_device(device: str) -> None:
-    if is_npu_device(device) or allow_non_npu_device():
-        return
-    raise SystemExit(
-        "codex-npu-context is NPU-only. "
-        f"Refusing OpenVINO device '{device}'. "
-        "Use an NPU device such as 'NPU' or set CODEX_NPU_CONTEXT_ALLOW_NON_NPU=1 for local diagnostics."
-    )
-
-
-def execution_shape(device: str, requested_batch_size: int, requested_parallelism: int = 1) -> tuple[int, int, str | None]:
-    requested_batch_size = max(1, int(requested_batch_size))
-    requested_parallelism = max(1, int(requested_parallelism))
-    if is_npu_device(device) and requested_batch_size > 1 and not allow_npu_batch():
-        return (
-            1,
-            max(requested_parallelism, requested_batch_size),
-            "NPU batch shapes above 1 are disabled by default because some drivers crash; using batch 1 with async parallel requests.",
-        )
-    return requested_batch_size, requested_parallelism, None
-
-
-def ensure_model_exists() -> None:
-    missing = [
-        name for name in ("openvino_model.xml", "openvino_model.bin", "tokenizer.json")
-        if not (model_dir() / name).exists()
-    ]
-    if missing:
-        raise SystemExit(
-            "OpenVINO model is missing.\n"
-            f"Expected: {model_dir()}\n"
-            f"Missing: {', '.join(missing)}\n"
-            "Run scripts/install.ps1 or download OpenVINO/Qwen3-Embedding-0.6B-int8-ov."
-        )
-
-
-def redact_secrets(text: str) -> str:
-    redacted = text
-    for pattern, label in SECRET_PATTERNS:
-        redacted = pattern.sub(f"[REDACTED_{label}]", redacted)
-    return redacted
-
-
-class Qwen3OpenVinoEmbedder:
-    def __init__(self, device: str = "NPU", batch_size: int = 1, parallelism: int = 1):
-        ensure_model_exists()
-        validate_npu_device(device)
-        self.device = device
-        self.batch_size = max(1, int(batch_size))
-        self.parallelism = max(1, int(parallelism))
-        self.tokenizer = AutoTokenizer.from_pretrained(
-            str(model_dir()),
-            local_files_only=True,
-            fix_mistral_regex=True,
-        )
-        core = ov.Core()
-        ov_cache_dir().mkdir(parents=True, exist_ok=True)
-        core.set_property({"CACHE_DIR": str(ov_cache_dir())})
-        self.devices = core.available_devices
-        self.npu_devices = filter_npu_devices(self.devices)
-
-        allowed_devices = self.devices if allow_non_npu_device() else self.npu_devices
-        if device not in allowed_devices:
-            available_label = "OpenVINO" if allow_non_npu_device() else "NPU"
-            raise SystemExit(
-                f"Requested OpenVINO device '{device}' is not available. "
-                f"Available {available_label} devices: {', '.join(allowed_devices) if allowed_devices else 'none'}"
-            )
-
-        model = core.read_model(str(model_dir() / "openvino_model.xml"))
-        model.reshape({"input_ids": [self.batch_size, MAX_LEN], "attention_mask": [self.batch_size, MAX_LEN]})
-        self.compile_properties = compile_properties()
-        started = time.time()
-        if self.compile_properties:
-            self.compiled = core.compile_model(model, device, self.compile_properties)
-        else:
-            self.compiled = core.compile_model(model, device)
-        self.compile_seconds = time.time() - started
-        self.output = self.compiled.output("last_hidden_state")
-
-    def embed_one(self, text: str, *, is_query: bool = False) -> np.ndarray:
-        return self.embed_batch([text], is_query=is_query)[0]
-
-    def embed_batch(self, texts: list[str], *, is_query: bool = False) -> np.ndarray:
-        if not texts:
-            return np.zeros((0, 1024), dtype=np.float32)
-        if len(texts) > self.batch_size:
-            raise ValueError(f"Batch has {len(texts)} texts but compiled batch size is {self.batch_size}.")
-        original_count = len(texts)
-        input_ids, attention_mask = self.encode_texts(texts, is_query=is_query)
-        if len(texts) < self.batch_size:
-            pad_count = self.batch_size - len(texts)
-            pad_ids, pad_mask = self.encode_texts([""] * pad_count, is_query=False)
-            input_ids = np.vstack([input_ids, pad_ids])
-            attention_mask = np.vstack([attention_mask, pad_mask])
-        result = self.compiled({"input_ids": input_ids, "attention_mask": attention_mask})
-        hidden = result[self.output]
-        return self.vectors_from_hidden(hidden[:original_count], attention_mask[:original_count])
-
-    def encode_texts(self, texts: list[str], *, is_query: bool = False) -> tuple[np.ndarray, np.ndarray]:
-        prepared = [self.prepare_text(text, is_query=is_query) for text in texts]
-        encoded = self.tokenizer(
-            prepared,
-            max_length=MAX_LEN,
-            padding="max_length",
-            truncation=True,
-            return_tensors="np",
-        )
-        return encoded["input_ids"].astype(np.int64), encoded["attention_mask"].astype(np.int64)
-
-    @staticmethod
-    def vectors_from_hidden(hidden: np.ndarray, attention_mask: np.ndarray) -> np.ndarray:
-        vectors = []
-        for row in range(hidden.shape[0]):
-            last_index = int(attention_mask[row].sum()) - 1
-            vector = hidden[row, max(last_index, 0)].astype(np.float32)
-            norm = np.linalg.norm(vector)
-            vectors.append(vector / norm if norm > 0 else vector)
-        return np.vstack(vectors).astype(np.float32)
-
-    @staticmethod
-    def prepare_text(text: str, *, is_query: bool = False) -> str:
-        if is_query:
-            return (
-                "Instruct: Retrieve relevant code, configuration, setup notes, "
-                "debugging history, and prior agent context.\nQuery: "
-                + text
-            )
-        return text
-
-    def embed_many(self, texts: list[str], *, is_query: bool = False) -> np.ndarray:
-        if not texts:
-            return np.zeros((0, 1024), dtype=np.float32)
-        if self.batch_size == 1 and self.parallelism > 1 and len(texts) > 1:
-            return self.embed_many_async(texts, is_query=is_query)
-        batches = [
-            self.embed_batch(texts[i:i + self.batch_size], is_query=is_query)
-            for i in range(0, len(texts), self.batch_size)
-        ]
-        return np.vstack(batches).astype(np.float32)
-
-    def embed_many_async(self, texts: list[str], *, is_query: bool = False) -> np.ndarray:
-        input_ids, attention_mask = self.encode_texts(texts, is_query=is_query)
-        request_count = min(self.parallelism, len(texts))
-        requests = [self.compiled.create_infer_request() for _ in range(request_count)]
-        available = requests[:]
-        inflight: list[tuple[int, object]] = []
-        vectors: list[np.ndarray | None] = [None] * len(texts)
-        next_index = 0
-
-        while next_index < len(texts) or inflight:
-            while next_index < len(texts) and available:
-                request = available.pop()
-                request.start_async({
-                    "input_ids": input_ids[next_index:next_index + 1],
-                    "attention_mask": attention_mask[next_index:next_index + 1],
-                })
-                inflight.append((next_index, request))
-                next_index += 1
-
-            current_index, request = inflight.pop(0)
-            request.wait()
-            hidden = request.get_tensor(self.output).data
-            vectors[current_index] = self.vectors_from_hidden(
-                hidden,
-                attention_mask[current_index:current_index + 1],
-            )[0]
-            available.append(request)
-
-        return np.vstack([vector for vector in vectors if vector is not None]).astype(np.float32)
-
+try:
+    import openvino as ov
+except ModuleNotFoundError:
+    ov = None
 
 DEFAULT_BENCH_QUERIES = [
     "where are the local MCP bridge setup notes",
@@ -299,132 +68,32 @@ DEFAULT_BENCH_QUERIES = [
 ]
 
 
-def extract_codex_jsonl_messages(path: Path) -> str:
-    parts: list[str] = []
-    with path.open("r", encoding="utf-8", errors="replace") as handle:
-        for line in handle:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                item = json.loads(line)
-            except Exception:
-                continue
-            payload = item.get("payload", {})
-            if item.get("type") == "response_item" and payload.get("type") == "message":
-                role = payload.get("role", "")
-                texts = []
-                for content in payload.get("content", []) or []:
-                    if content.get("type") in {"input_text", "output_text"} and content.get("text"):
-                        texts.append(str(content["text"]))
-                if texts:
-                    parts.append(f"{role}: " + "\n".join(texts))
-            elif item.get("type") == "event_msg" and payload.get("message"):
-                parts.append(str(payload["message"]))
-    return "\n\n".join(parts)
-
-
-def read_text(path: Path) -> str:
-    try:
-        if path.suffix.lower() == ".jsonl":
-            return extract_codex_jsonl_messages(path)
-        return path.read_text(encoding="utf-8", errors="replace")
-    except Exception:
-        return ""
-
-
-def should_skip(path: Path, limit_mb: int) -> bool:
-    name = path.name.lower()
-    if name in SENSITIVE_FILE_NAMES or path.suffix.lower() in {".pem", ".key", ".pfx"}:
-        return True
-    if name in NOISY_FILE_NAMES:
-        return True
-    if any(part.lower() in SKIP_PARTS for part in path.parts):
-        return True
-    if path.suffix.lower() not in DEFAULT_EXTENSIONS:
-        return True
-    try:
-        return path.stat().st_size > limit_mb * 1024 * 1024
-    except OSError:
-        return True
-
-
-def iter_files(roots: list[Path], limit_mb: int) -> list[Path]:
-    files: list[Path] = []
-    for root in roots:
-        if not root.exists():
-            continue
-        candidates = [root] if root.is_file() else (p for p in root.rglob("*") if p.is_file())
-        for path in candidates:
-            if not should_skip(path, limit_mb):
-                files.append(path)
-    return sorted(files, key=file_priority)
-
-
-def file_priority(path: Path) -> tuple[int, int, str]:
-    path_str = str(path).replace("/", "\\").lower()
-    name = path.name.lower()
-    suffix = path.suffix.lower()
-    if "\\.codex\\memories\\" in path_str:
-        bucket = 0
-    elif name in {"readme.md", "agents.md", "skill.md"} or "\\docs\\" in path_str:
-        bucket = 1
-    elif "\\.codex\\sessions\\" in path_str:
-        bucket = 2
-    elif suffix in {".md", ".txt", ".toml", ".yaml", ".yml"}:
-        bucket = 3
-    else:
-        bucket = 4
-    try:
-        size = path.stat().st_size
-    except OSError:
-        size = 0
-    return (bucket, size, path_str)
-
-
-def chunk_text(text: str, chunk_chars: int = 1400, overlap: int = 180) -> list[str]:
-    text = re.sub(r"\s+", " ", redact_secrets(text)).strip()
-    if not text:
-        return []
-    chunks: list[str] = []
-    start = 0
-    while start < len(text):
-        end = min(len(text), start + chunk_chars)
-        chunk = text[start:end].strip()
-        if len(chunk) > 80:
-            chunks.append(chunk)
-        if end == len(text):
-            break
-        start = max(0, end - overlap)
-    return chunks
-
-
 def build_index(args: argparse.Namespace) -> None:
     roots = [Path(p).expanduser().resolve() for p in args.roots]
+    secret_scan = scan_secrets_payload([str(root) for root in roots], limit_mb=args.limit_mb, fail_on_secret=args.fail_on_secret)
     files = iter_files(roots, args.limit_mb)
-    chunks = []
-    for path in files:
-        text = read_text(path)
-        for i, chunk in enumerate(chunk_text(text, args.chunk_chars, args.overlap)):
-            if args.max_chunks_per_file and i >= args.max_chunks_per_file:
-                break
-            chunks.append({"path": str(path), "chunk": i, "text": chunk})
-            if args.max_chunks and len(chunks) >= args.max_chunks:
-                break
-        if args.max_chunks and len(chunks) >= args.max_chunks:
-            break
+    settings = index_settings(args)
+    existing_cache = build_existing_file_cache(settings, load_index) if args.incremental else {}
+    chunks, reused_vector_rows, manifest_files, incremental_stats = collect_index_chunks(files, args, existing_cache)
 
     index_dir().mkdir(parents=True, exist_ok=True)
     batch_size, parallelism, batch_note = execution_shape(args.device, args.batch_size, args.parallelism)
     embedder = Qwen3OpenVinoEmbedder(args.device, batch_size=batch_size, parallelism=parallelism)
-    started = time.time()
-    vectors = embedder.embed_many([c["text"] for c in chunks])
-    elapsed = time.time() - started
+    vectors, elapsed, embedded_count = assemble_vectors(chunks, reused_vector_rows, existing_cache, embedder)
 
     np.save(emb_path(), vectors)
     with meta_path().open("w", encoding="utf-8") as handle:
         for chunk in chunks:
             handle.write(json.dumps(chunk, ensure_ascii=False) + "\n")
+    write_manifest({
+        "format_version": INDEX_FORMAT_VERSION,
+        "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "roots": [str(root) for root in roots],
+        "settings": settings,
+        "files": manifest_files,
+        "chunks": len(chunks),
+        "vectors_shape": list(vectors.shape),
+    })
 
     print(json.dumps({
         "ok": True,
@@ -438,9 +107,20 @@ def build_index(args: argparse.Namespace) -> None:
         "compile_properties": embedder.compile_properties,
         "files": len(files),
         "chunks": len(chunks),
+        "secret_scan": {
+            "status": secret_scan["status"],
+            "findings_count": secret_scan["findings_count"],
+            "sensitive_files_skipped_count": secret_scan["sensitive_files_skipped_count"],
+        },
         "embedding_seconds": round(elapsed, 3),
-        "chunks_per_second": round(len(chunks) / elapsed, 3) if elapsed else None,
+        "chunks_embedded": embedded_count,
+        "chunks_reused": incremental_stats["chunks_reused"],
+        "files_embedded": incremental_stats["files_embedded"],
+        "files_reused": incremental_stats["files_reused"],
+        "incremental": bool(args.incremental),
+        "chunks_per_second": round(embedded_count / elapsed, 3) if elapsed and embedded_count else None,
         "index_dir": str(index_dir()),
+        "manifest": str(manifest_path()),
     }, ensure_ascii=False, indent=2))
 
 
@@ -459,40 +139,6 @@ def load_index() -> tuple[list[dict], np.ndarray]:
             "Rebuild the index."
         )
     return meta, vectors
-
-
-def result_rows(
-    meta: list[dict],
-    vectors: np.ndarray,
-    query_vector: np.ndarray,
-    top_k: int,
-    preview_chars: int,
-    min_score: float = 0.0,
-) -> tuple[list[dict], float, float | None]:
-    started = time.perf_counter()
-    scores = vectors @ query_vector
-    top_idx = np.argsort(-scores)
-    rank_seconds = time.perf_counter() - started
-    best_score = float(scores[int(top_idx[0])]) if len(top_idx) else None
-
-    results = []
-    for idx in top_idx:
-        item = meta[int(idx)]
-        score = float(scores[int(idx)])
-        if score < min_score:
-            continue
-        text = item["text"]
-        if len(text) > preview_chars:
-            text = text[:preview_chars].rstrip() + "..."
-        results.append({
-            "score": round(score, 4),
-            "path": item["path"],
-            "chunk": item["chunk"],
-            "text": text,
-        })
-        if len(results) >= top_k:
-            break
-    return results, rank_seconds, best_score
 
 
 def search_payload(
@@ -543,6 +189,133 @@ def search_payload(
     }
 
 
+def dual_search_payload(
+    query: str,
+    *,
+    device: str,
+    roots: list[str] | None = None,
+    rg: str | None = None,
+    top_k: int = 8,
+    preview_chars: int = 600,
+    min_score: float | None = None,
+    embedder: Qwen3OpenVinoEmbedder | None = None,
+    meta: list[dict] | None = None,
+    vectors: np.ndarray | None = None,
+) -> dict:
+    semantic = search_payload(
+        query,
+        device=device,
+        top_k=top_k,
+        preview_chars=preview_chars,
+        min_score=min_score,
+        embedder=embedder,
+        meta=meta,
+        vectors=vectors,
+    )
+    exact = run_rg_search(rg, roots)
+    merged = merge_dual_results(semantic["results"], exact["results"], top_k)
+    has_result = bool(merged)
+    both_count = sum(1 for result in merged if result["source"] == "both")
+
+    return {
+        "ok": True,
+        "status": "ok" if has_result else "no_confident_result",
+        "query": query,
+        "rg": rg,
+        "roots": exact.get("roots", roots or []),
+        "has_confident_result": has_result,
+        "best_score": semantic.get("best_score"),
+        "semantic_status": semantic.get("status"),
+        "exact_status": exact.get("status"),
+        "both_count": both_count,
+        "semantic": semantic,
+        "exact": exact,
+        "merged": merged,
+    }
+
+
+def quality_benchmark_payload(
+    cases_path: str,
+    *,
+    device: str,
+    roots: list[str] | None = None,
+    top_k: int = 8,
+    min_score: float | None = None,
+) -> dict:
+    cases = json.loads(Path(cases_path).read_text(encoding="utf-8"))
+    if not isinstance(cases, list):
+        raise SystemExit("Quality benchmark cases file must contain a JSON array.")
+
+    meta, vectors = load_index()
+    embedder = Qwen3OpenVinoEmbedder(device)
+    semantic_rows = []
+    exact_rows = []
+    hybrid_rows = []
+    case_payloads = []
+
+    for case_index, case in enumerate(cases):
+        query = str(case.get("query", "")).strip()
+        if not query:
+            raise SystemExit(f"Case {case_index} is missing query.")
+        relevant_paths = [str(path) for path in case.get("relevant_paths", [])]
+        if not relevant_paths:
+            raise SystemExit(f"Case {case_index} is missing relevant_paths.")
+        case_roots = [str(root) for root in (case.get("roots") or roots or [])]
+        rg_pattern = str(case.get("rg", "")).strip() or None
+
+        semantic = search_payload(
+            query,
+            device=device,
+            top_k=top_k,
+            preview_chars=160,
+            min_score=min_score,
+            embedder=embedder,
+            meta=meta,
+            vectors=vectors,
+        )
+        exact = run_rg_search(rg_pattern, case_roots, max_results=top_k * 10)
+        merged = merge_dual_results(semantic["results"], exact["results"], top_k)
+
+        semantic_metrics = retrieval_metrics([row["path"] for row in semantic["results"]], relevant_paths, top_k)
+        exact_metrics = retrieval_metrics(exact.get("paths", []), relevant_paths, top_k)
+        hybrid_metrics = retrieval_metrics([row["path"] for row in merged], relevant_paths, top_k)
+        semantic_rows.append(semantic_metrics)
+        exact_rows.append(exact_metrics)
+        hybrid_rows.append(hybrid_metrics)
+        case_payloads.append({
+            "query": query,
+            "rg": rg_pattern,
+            "relevant_paths": relevant_paths,
+            "semantic": semantic_metrics,
+            "exact": exact_metrics,
+            "hybrid": hybrid_metrics,
+            "semantic_top": [row["path"] for row in semantic["results"][:top_k]],
+            "exact_top": exact.get("paths", [])[:top_k],
+            "hybrid_top": [row["path"] for row in merged[:top_k]],
+        })
+
+    return {
+        "ok": True,
+        "cases": len(cases),
+        "top_k": top_k,
+        "summary": {
+            "semantic": {
+                "recall_at_k": summarize_metric_rows(semantic_rows, "recall_at_k"),
+                "mrr": summarize_metric_rows(semantic_rows, "mrr"),
+            },
+            "exact": {
+                "recall_at_k": summarize_metric_rows(exact_rows, "recall_at_k"),
+                "mrr": summarize_metric_rows(exact_rows, "mrr"),
+            },
+            "hybrid": {
+                "recall_at_k": summarize_metric_rows(hybrid_rows, "recall_at_k"),
+                "mrr": summarize_metric_rows(hybrid_rows, "mrr"),
+            },
+        },
+        "results": case_payloads,
+    }
+
+
 def search(args: argparse.Namespace) -> None:
     print(json.dumps(
         search_payload(
@@ -557,8 +330,148 @@ def search(args: argparse.Namespace) -> None:
     ))
 
 
+def dual_search(args: argparse.Namespace) -> None:
+    print(json.dumps(
+        dual_search_payload(
+            args.query,
+            device=args.device,
+            roots=args.roots,
+            rg=args.rg,
+            top_k=args.top_k,
+            preview_chars=args.preview_chars,
+            min_score=args.min_score,
+        ),
+        ensure_ascii=False,
+        indent=2,
+    ))
+
+
+def scan_secrets(args: argparse.Namespace) -> None:
+    print(json.dumps(
+        scan_secrets_payload(
+            args.roots,
+            limit_mb=args.limit_mb,
+            fail_on_secret=args.fail_on_secret,
+        ),
+        ensure_ascii=False,
+        indent=2,
+    ))
+
+
+def module_available(name: str) -> bool:
+    try:
+        __import__(name)
+        return True
+    except Exception:
+        return False
+
+
+def command_version(command: str, *args: str) -> str | None:
+    executable = shutil.which(command)
+    if not executable:
+        return None
+    try:
+        completed = subprocess.run(
+            [executable, *args],
+            check=False,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=10,
+        )
+    except Exception:
+        return None
+    output = (completed.stdout or completed.stderr).strip()
+    return output.splitlines()[0] if output else None
+
+
+def doctor_payload(device: str, *, codex_home: str | None = None) -> dict:
+    codex_home_path = Path(codex_home or os.environ.get("CODEX_HOME") or Path.home() / ".codex").expanduser().resolve()
+    config_path = codex_home_path / "config.toml"
+    skill_path = codex_home_path / "skills" / "codex-npu-context" / "SKILL.md"
+    config_text = config_path.read_text(encoding="utf-8", errors="replace") if config_path.exists() else ""
+    imports = {
+        "numpy": module_available("numpy"),
+        "openvino": module_available("openvino"),
+        "transformers": module_available("transformers"),
+        "huggingface_hub": module_available("huggingface_hub"),
+    }
+    model_files = ["openvino_model.xml", "openvino_model.bin", "tokenizer.json"]
+    missing_model_files = [name for name in model_files if not (model_dir() / name).exists()]
+    index_exists = meta_path().exists() and emb_path().exists()
+    openvino_status = None
+    openvino_status_error = None
+    if imports["openvino"]:
+        try:
+            core = ov.Core()
+            npu_devices = filter_npu_devices(core.available_devices)
+            openvino_status = {
+                "available_devices": core.available_devices,
+                "npu_devices": npu_devices,
+                "npu_available": bool(npu_devices),
+            }
+        except Exception as exc:
+            openvino_status_error = str(exc)
+
+    python_ok = sys.version_info.major == 3 and sys.version_info.minor == 11
+    payload = {
+        "ok": bool(
+            python_ok
+            and shutil.which("node")
+            and shutil.which("npm")
+            and shutil.which("rg")
+            and (openvino_status is None or openvino_status.get("npu_available"))
+        ),
+        "root": str(ROOT),
+        "platform": platform.platform(),
+        "python": {
+            "executable": sys.executable,
+            "version": platform.python_version(),
+            "requires": "3.11",
+            "ok": python_ok,
+            "imports": imports,
+        },
+        "commands": {
+            "node": {"path": shutil.which("node"), "version": command_version("node", "--version")},
+            "npm": {"path": shutil.which("npm"), "version": command_version("npm", "--version")},
+            "rg": {"path": shutil.which("rg"), "version": command_version("rg", "--version")},
+        },
+        "model": {
+            "dir": str(model_dir()),
+            "exists": not missing_model_files,
+            "missing": missing_model_files,
+        },
+        "index": {
+            "dir": str(index_dir()),
+            "exists": index_exists,
+            "manifest_exists": manifest_path().exists(),
+        },
+        "codex": {
+            "home": str(codex_home_path),
+            "config_path": str(config_path),
+            "config_exists": config_path.exists(),
+            "mcp_configured": "[mcp_servers.codex-npu-context]" in config_text,
+            "preload_enabled": 'CODEX_NPU_CONTEXT_PRELOAD = "1"' in config_text,
+            "skill_path": str(skill_path),
+            "skill_exists": skill_path.exists(),
+        },
+        "openvino": openvino_status,
+        "openvino_error": openvino_status_error,
+    }
+    return payload
+
+
+def doctor(args: argparse.Namespace) -> None:
+    payload = doctor_payload(args.device, codex_home=args.codex_home)
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
+    if args.fail and not payload["ok"]:
+        raise SystemExit(1)
+
+
 def status_payload(device: str, *, include_device_names: bool = False) -> dict:
     validate_npu_device(device)
+    ensure_runtime_dependencies()
     core = ov.Core()
     npu_devices = filter_npu_devices(core.available_devices)
     payload = {
@@ -588,6 +501,13 @@ def status_payload(device: str, *, include_device_names: bool = False) -> dict:
             payload["embeddings_shape"] = list(np.load(emb_path(), mmap_mode="r").shape)
         except Exception:
             pass
+    if manifest_path().exists():
+        manifest = load_manifest()
+        if manifest:
+            payload["manifest_exists"] = True
+            payload["index_format_version"] = manifest.get("format_version")
+            payload["indexed_files"] = len(manifest.get("files") or {})
+            payload["index_settings"] = manifest.get("settings")
     return payload
 
 
@@ -745,6 +665,20 @@ def benchmark(args: argparse.Namespace) -> None:
     print(json.dumps(benchmark_payload(args), ensure_ascii=False, indent=2))
 
 
+def quality_benchmark(args: argparse.Namespace) -> None:
+    print(json.dumps(
+        quality_benchmark_payload(
+            args.cases,
+            device=args.device,
+            roots=args.roots,
+            top_k=args.top_k,
+            min_score=args.min_score,
+        ),
+        ensure_ascii=False,
+        indent=2,
+    ))
+
+
 class JsonLineWorker:
     def __init__(self, device: str):
         self.device = device
@@ -805,6 +739,26 @@ class JsonLineWorker:
                 meta=meta,
                 vectors=vectors,
             )
+        if method == "dual_search":
+            query = str(params.get("query", "")).strip()
+            top_k = int(params.get("top_k", 8))
+            preview_chars = int(params.get("preview_chars", 600))
+            min_score = float(params.get("min_score", default_min_score()))
+            roots = params.get("roots") if isinstance(params.get("roots"), list) else None
+            rg = str(params.get("rg", "")).strip() or None
+            meta, vectors = self.get_index()
+            return dual_search_payload(
+                query,
+                device=self.device,
+                roots=[str(root) for root in roots] if roots else None,
+                rg=rg,
+                top_k=max(1, min(20, top_k)),
+                preview_chars=max(80, min(4000, preview_chars)),
+                min_score=min_score,
+                embedder=self.get_embedder(),
+                meta=meta,
+                vectors=vectors,
+            )
         if method == "benchmark":
             requested_devices = [self.device]
             if self.device in requested_devices and self.embedder is None:
@@ -822,6 +776,19 @@ class JsonLineWorker:
             )
             cached = {self.device: self.embedder} if self.embedder is not None else None
             return benchmark_payload(bench_args, cached_embedders=cached)
+        if method == "quality_benchmark":
+            cases_path = str(params.get("cases", "")).strip()
+            if not cases_path:
+                raise SystemExit("cases is required")
+            roots = params.get("roots") if isinstance(params.get("roots"), list) else None
+            min_score_param = params.get("min_score")
+            return quality_benchmark_payload(
+                cases_path,
+                device=self.device,
+                roots=[str(root) for root in roots] if roots else None,
+                top_k=max(1, min(20, int(params.get("top_k", 8)))),
+                min_score=float(min_score_param) if min_score_param is not None else None,
+            )
         raise SystemExit(f"Unknown worker method: {method}")
 
 
@@ -869,6 +836,9 @@ def main() -> None:
     index_p.add_argument("--parallelism", type=int, default=1)
     index_p.add_argument("--chunk-chars", type=int, default=1400)
     index_p.add_argument("--overlap", type=int, default=180)
+    index_p.add_argument("--fail-on-secret", action="store_true", help="Abort indexing if secret-like content is detected in indexable files.")
+    index_p.add_argument("--no-incremental", dest="incremental", action="store_false", help="Re-embed every selected chunk even if an existing manifest can be reused.")
+    index_p.set_defaults(incremental=True)
     index_p.set_defaults(func=build_index)
 
     search_p = sub.add_parser("search", help="Search the local private index.")
@@ -883,6 +853,28 @@ def main() -> None:
         help=f"Hide matches below this cosine score. Defaults to CODEX_NPU_CONTEXT_MIN_SCORE or {DEFAULT_MIN_SCORE}.",
     )
     search_p.set_defaults(func=search)
+
+    dual_p = sub.add_parser("dual-search", help="Run semantic search plus an optional rg exact search and merge by path.")
+    add_legacy_device_flag(dual_p)
+    dual_p.add_argument("query")
+    dual_p.add_argument("--roots", nargs="*", default=None, help="Roots for the rg exact-search half.")
+    dual_p.add_argument("--rg", default=None, help="Regex or token pattern for rg exact search.")
+    dual_p.add_argument("--top-k", type=int, default=8)
+    dual_p.add_argument("--preview-chars", type=int, default=600)
+    dual_p.add_argument(
+        "--min-score",
+        type=float,
+        default=None,
+        help=f"Hide semantic matches below this cosine score. Defaults to CODEX_NPU_CONTEXT_MIN_SCORE or {DEFAULT_MIN_SCORE}.",
+    )
+    dual_p.set_defaults(func=dual_search)
+
+    scan_p = sub.add_parser("secret-scan", help="Scan indexable files for secret-like content without building embeddings.")
+    add_legacy_device_flag(scan_p)
+    scan_p.add_argument("--roots", nargs="+", required=True)
+    scan_p.add_argument("--limit-mb", type=int, default=12)
+    scan_p.add_argument("--fail-on-secret", action="store_true", help="Exit non-zero if secret-like content is detected.")
+    scan_p.set_defaults(func=scan_secrets)
 
     status_p = sub.add_parser("status", help="Show model, index, and OpenVINO device status.")
     add_legacy_device_flag(status_p)
@@ -903,6 +895,20 @@ def main() -> None:
     bench_p.add_argument("--batch-sizes", nargs="+", type=int, default=None)
     bench_p.add_argument("--queries", nargs="*", help="Queries to cycle through during the benchmark.")
     bench_p.set_defaults(func=benchmark)
+
+    quality_p = sub.add_parser("quality-bench", help="Compare semantic, rg exact, and hybrid retrieval against labeled cases.")
+    add_legacy_device_flag(quality_p)
+    quality_p.add_argument("--cases", required=True, help="JSON array of cases with query, relevant_paths, optional rg, and optional roots.")
+    quality_p.add_argument("--roots", nargs="*", default=None, help="Default roots for cases that omit roots.")
+    quality_p.add_argument("--top-k", type=int, default=8)
+    quality_p.add_argument("--min-score", type=float, default=None)
+    quality_p.set_defaults(func=quality_benchmark)
+
+    doctor_p = sub.add_parser("doctor", help="Run packaging, dependency, model, index, Codex config, and NPU checks.")
+    add_legacy_device_flag(doctor_p)
+    doctor_p.add_argument("--codex-home", default=None)
+    doctor_p.add_argument("--fail", action="store_true", help="Exit non-zero when required checks fail.")
+    doctor_p.set_defaults(func=doctor)
 
     serve_p = sub.add_parser("serve", help="Run a persistent JSONL worker for MCP.")
     add_legacy_device_flag(serve_p)

@@ -5,7 +5,8 @@ param(
     [string]$ModelDir = "",
     [string]$IndexDir = "",
     [string]$OvCacheDir = "",
-    [switch]$NoSkill
+    [switch]$NoSkill,
+    [switch]$NoPreload
 )
 
 $ErrorActionPreference = "Stop"
@@ -60,6 +61,10 @@ $Block = @(
     ('CODEX_NPU_CONTEXT_DEVICE = "{0}"' -f (ConvertTo-TomlString $Device))
 )
 
+if (!$NoPreload) {
+    $Block += 'CODEX_NPU_CONTEXT_PRELOAD = "1"'
+}
+
 if ($Python) {
     $Block += ('CODEX_NPU_CONTEXT_PYTHON = "{0}"' -f (ConvertTo-TomlString $Python))
 }
@@ -79,5 +84,8 @@ Set-Content -Path $ConfigPath -Value $NewConfig -Encoding utf8
 Write-Host "Configured Codex MCP: $McpEntry"
 if (!$NoSkill) {
     Write-Host "Installed Codex skill: $(Join-Path $CodexHome "skills\codex-npu-context")"
+}
+if (!$NoPreload) {
+    Write-Host "Enabled MCP preload: CODEX_NPU_CONTEXT_PRELOAD=1"
 }
 Write-Host "Restart Codex to reload MCP servers and skills."

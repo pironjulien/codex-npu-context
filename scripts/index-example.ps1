@@ -5,7 +5,9 @@ param(
     [int]$MaxChunks = 500,
     [int]$MaxChunksPerFile = 120,
     [int]$BatchSize = 8,
-    [int]$Parallelism = 1
+    [int]$Parallelism = 1,
+    [switch]$FailOnSecret,
+    [switch]$NoIncremental
 )
 
 $ErrorActionPreference = "Stop"
@@ -19,4 +21,10 @@ $Args = @($Script, "--device", $Device, "index", "--roots") + $Roots + @(
     "--batch-size", $BatchSize,
     "--parallelism", $Parallelism
 )
+if ($FailOnSecret) {
+    $Args += "--fail-on-secret"
+}
+if ($NoIncremental) {
+    $Args += "--no-incremental"
+}
 & $Python @Args

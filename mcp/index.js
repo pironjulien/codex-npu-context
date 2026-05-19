@@ -181,6 +181,31 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
       },
     },
     {
+      name: "codex_npu_dual_search",
+      description: "Run NPU semantic search and an optional rg exact search, then merge results by path.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          query: { type: "string", description: "Natural-language semantic query." },
+          roots: {
+            type: "array",
+            items: { type: "string" },
+            description: "Roots for the rg exact-search half. Exact search is skipped when omitted.",
+          },
+          rg: {
+            type: "string",
+            description: "Regex or token pattern for rg exact search. Exact search is skipped when omitted.",
+          },
+          top_k: { type: "number", description: "Number of merged results.", default: 8 },
+          min_score: {
+            type: "number",
+            description: "Hide semantic matches below this cosine score. Defaults to CODEX_NPU_CONTEXT_MIN_SCORE or 0.45.",
+          },
+        },
+        required: ["query"],
+      },
+    },
+    {
       name: "codex_npu_status",
       description: "Show OpenVINO device, model, and local index status.",
       inputSchema: { type: "object", properties: {} },
@@ -212,6 +237,30 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
         },
       },
     },
+    {
+      name: "codex_npu_quality_benchmark",
+      description: "Compare semantic-only, rg exact-only, and hybrid retrieval against a local labeled JSON cases file.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          cases: {
+            type: "string",
+            description: "Path to a local JSON array of cases with query, relevant_paths, optional rg, and optional roots.",
+          },
+          roots: {
+            type: "array",
+            items: { type: "string" },
+            description: "Default rg roots for cases that omit roots.",
+          },
+          top_k: { type: "number", description: "Number of results to score per retrieval mode.", default: 8 },
+          min_score: {
+            type: "number",
+            description: "Hide semantic matches below this cosine score. Defaults to CODEX_NPU_CONTEXT_MIN_SCORE or 0.45.",
+          },
+        },
+        required: ["cases"],
+      },
+    },
   ],
 }));
 
@@ -229,6 +278,25 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       params.min_score = Math.max(-1, Math.min(1, Number(args.min_score)));
     }
     return text(JSON.stringify(await callWorker("search", params), null, 2));
+  }
+
+  if (name === "codex_npu_dual_search") {
+    const query = String(args.query || "").trim();
+    if (!query) throw new Error("query is required");
+    const topK = Number.isFinite(Number(args.top_k))
+      ? Math.max(1, Math.min(20, Number(args.top_k)))
+      : 8;
+    const params = { query, top_k: topK };
+    if (Array.isArray(args.roots) && args.roots.length > 0) {
+      params.roots = args.roots.map((root) => String(root)).filter(Boolean);
+    }
+    if (typeof args.rg === "string" && args.rg.trim()) {
+      params.rg = args.rg.trim();
+    }
+    if (Number.isFinite(Number(args.min_score))) {
+      params.min_score = Math.max(-1, Math.min(1, Number(args.min_score)));
+    }
+    return text(JSON.stringify(await callWorker("dual_search", params), null, 2));
   }
 
   if (name === "codex_npu_status") {
@@ -258,6 +326,22 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       params.queries = args.queries.map((query) => String(query)).filter(Boolean);
     }
     return text(JSON.stringify(await callWorker("benchmark", params), null, 2));
+  }
+
+  if (name === "codex_npu_quality_benchmark") {
+    const cases = String(args.cases || "").trim();
+    if (!cases) throw new Error("cases is required");
+    const params = { cases };
+    if (Array.isArray(args.roots) && args.roots.length > 0) {
+      params.roots = args.roots.map((root) => String(root)).filter(Boolean);
+    }
+    if (Number.isFinite(Number(args.top_k))) {
+      params.top_k = Math.max(1, Math.min(20, Number(args.top_k)));
+    }
+    if (Number.isFinite(Number(args.min_score))) {
+      params.min_score = Math.max(-1, Math.min(1, Number(args.min_score)));
+    }
+    return text(JSON.stringify(await callWorker("quality_benchmark", params), null, 2));
   }
 
   throw new Error(`Unknown tool: ${name}`);

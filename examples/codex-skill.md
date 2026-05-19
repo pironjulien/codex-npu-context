@@ -5,7 +5,7 @@ description: Use when a task is vague, underspecified, or would benefit from sem
 
 # Codex NPU Context
 
-Use `codex_npu_search` when local semantic context is more useful than exact keyword search.
+Use `codex_npu_dual_search` when local semantic context and exact keyword proof should be combined. Use `codex_npu_search` when roots are unknown or no exact token exists.
 
 Good triggers:
 
@@ -18,11 +18,12 @@ Good triggers:
 Workflow:
 
 1. Call `codex_npu_status` if you need to confirm the index exists.
-2. For vague local-memory lookups, run `codex_npu_search` with a concise natural-language query and, when concrete tokens exist, run `rg` exact search for those tokens in parallel.
-3. Prefer `rg` for exact strings, symbols, filenames, commands, error text, and potential secrets.
-4. Prefer MCP results for semantic leads when exact terms are missing, ambiguous, or too generic.
-5. Treat returned paths and excerpts as leads, then read the real files before editing or making claims.
-6. If MCP returns `no_confident_result` and exact search has no hits, say there is no local confident match and ask to re-index or search another source.
+2. For vague local-memory lookups with concrete tokens, prefer `codex_npu_dual_search`: use a concise natural-language `query`, pass caller-relevant `roots`, and put exact strings/symbols/regex tokens in `rg`.
+3. If roots are unknown or no exact token exists, run `codex_npu_search` with a concise natural-language query and, when concrete tokens later appear, run `rg` exact search for those tokens in parallel.
+4. Prefer `rg` for exact strings, symbols, filenames, commands, error text, and potential secrets.
+5. Prefer MCP results for semantic leads when exact terms are missing, ambiguous, or too generic.
+6. Treat returned paths and excerpts as leads, then read the real files before editing or making claims.
+7. If MCP returns `no_confident_result` and exact search has no hits, say there is no local confident match and ask to re-index or search another source.
 
 Important:
 
