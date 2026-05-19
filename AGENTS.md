@@ -204,7 +204,7 @@ Before reporting success, all of these must be true:
 - The installed skill file hash matches this repo's `skills\codex-npu-context\SKILL.md`.
 - `index\chunks.jsonl`, `index\embeddings.npy`, and `index\manifest.json` exist after the safe test index build.
 - `.\scripts\verify-codex-install.ps1` exits 0.
-- `.\scripts\mcp-smoke.ps1` exits 0 and proves `initialize`, `tools/list`, `codex_npu_status`, and `codex_npu_search` through MCP stdio.
+- `.\scripts\mcp-smoke.ps1` exits 0 and proves `initialize`, `tools/list`, `codex_npu_status`, `codex_npu_search`, and `codex_npu_dual_search` with at least one `both` semantic + exact result through MCP stdio.
 - `.\scripts\mcp-warm-benchmark.ps1 -Iterations 8` exits 0 and reports first-call and warm-call latency separately.
 - A post-install `.\scripts\doctor.ps1` exits 0 and reports `npu_available = true`.
 - `.\scripts\benchmark.ps1 -Iterations 10` exits 0 and returns at least one successful NPU run.

@@ -2,6 +2,7 @@ param(
     [string]$RuntimeDir = (Split-Path -Parent $PSScriptRoot),
     [string]$Device = "NPU",
     [string]$Query = "portable install Codex MCP runtime",
+    [string]$ExactPattern = "README.md|Install With Codex|portable installer",
     [int]$TopK = 3,
     [double]$MinScore = 0.3
 )
@@ -29,6 +30,7 @@ $Payload = @{
     ovCacheDir = $OvCacheDir
     device = $Device
     query = $Query
+    exactPattern = $ExactPattern
     topK = $TopK
     minScore = $MinScore
 } | ConvertTo-Json -Compress
@@ -134,6 +136,17 @@ const timer = setTimeout(() => {
     },
   })));
 
+  const dual = JSON.parse(toolText(await send("tools/call", {
+    name: "codex_npu_dual_search",
+    arguments: {
+      query: input.query,
+      rg: input.exactPattern,
+      roots: [input.runtimeDir],
+      top_k: input.topK,
+      min_score: input.minScore,
+    },
+  })));
+
   const ok = Boolean(
     initialized?.serverInfo?.name === "codex-npu-context" &&
     missingTools.length === 0 &&
@@ -142,7 +155,10 @@ const timer = setTimeout(() => {
     status.index_exists === true &&
     Number(status.chunks || 0) > 0 &&
     search.ok === true &&
-    search.has_confident_result === true
+    search.has_confident_result === true &&
+    dual.ok === true &&
+    dual.has_confident_result === true &&
+    Number(dual.both_count || 0) > 0
   );
 
   finish(ok ? 0 : 1, {
@@ -171,6 +187,23 @@ const timer = setTimeout(() => {
         start_line: row.start_line,
         end_line: row.end_line,
         chunk_type: row.chunk_type,
+      })),
+    },
+    dual_search: {
+      status: dual.status,
+      semantic_status: dual.semantic_status,
+      exact_status: dual.exact_status,
+      best_score: dual.best_score,
+      both_count: dual.both_count,
+      has_confident_result: dual.has_confident_result,
+      merged_top: (dual.merged || []).slice(0, input.topK).map((row) => ({
+        source: row.source,
+        confidence: row.confidence,
+        semantic_score: row.semantic_score,
+        rg_hits: row.rg_hits,
+        path: row.path,
+        start_line: row.start_line,
+        end_line: row.end_line,
       })),
     },
     stderr: stderr.trim(),

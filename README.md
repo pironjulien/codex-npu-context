@@ -340,6 +340,8 @@ MCP stdio smoke test:
 .\scripts\mcp-smoke.ps1
 ```
 
+This validates `initialize`, `tools/list`, `codex_npu_status`, `codex_npu_search`, and a real `codex_npu_dual_search` call with a `both` semantic + exact result.
+
 Worker-hot MCP latency, separating first call from repeated calls through the same persistent worker:
 
 ```powershell
